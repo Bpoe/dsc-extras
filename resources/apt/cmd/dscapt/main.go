@@ -18,6 +18,7 @@ import (
 const (
 	version       = "0.1.0"
 	sourceDir     = "/etc/apt/sources.list.d"
+	keyringDir    = "/etc/apt/keyrings"
 	maxInputBytes = 1 << 20
 )
 
@@ -43,10 +44,10 @@ type testState struct {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, sourceDir))
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, sourceDir, keyringDir))
 }
 
-func run(args []string, stdin io.Reader, stdout, stderr io.Writer, dir string) int {
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer, dir, keysDir string) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		_, _ = fmt.Fprintln(stdout, "Usage: dscapt <get|set|test>")
 		return 0
@@ -69,24 +70,32 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, dir string) i
 
 	switch args[0] {
 	case "get":
-		current, err := getRepository(dir, desired.Name)
+		current, err := getRepository(dir, keysDir, desired.Name)
 		if err != nil {
 			return reportError(stderr, "failed to read the repository source file")
 		}
 		return writeJSON(stdout, current, stderr)
 	case "test":
-		current, err := getRepository(dir, desired.Name)
+		current, err := getRepository(dir, keysDir, desired.Name)
 		if err != nil {
 			return reportError(stderr, "failed to read the repository source file")
 		}
+		inDesired := inDesiredState(desired, current)
+		if desired.Ensure == "Absent" {
+			exists, err := pathExists(keyringPath(keysDir, desired.Name))
+			if err != nil {
+				return reportError(stderr, "failed to inspect the repository keyring file")
+			}
+			inDesired = inDesired && !exists
+		}
 		return writeJSON(stdout, testState{
 			repository:     current,
-			InDesiredState: inDesiredState(desired, current),
+			InDesiredState: inDesired,
 		}, stderr)
 	case "set":
-		current, err := setRepository(dir, desired)
+		current, err := setRepository(dir, keysDir, desired)
 		if err != nil {
-			return reportError(stderr, "failed to set the repository source file")
+			return reportError(stderr, "failed to set the repository source or keyring file")
 		}
 		return writeJSON(stdout, current, stderr)
 	default:
@@ -228,7 +237,7 @@ func normalizeSigningKey(value string) (string, error) {
 	return value, nil
 }
 
-func getRepository(dir, name string) (repository, error) {
+func getRepository(dir, keysDir, name string) (repository, error) {
 	path := sourcePath(dir, name)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -244,12 +253,11 @@ func getRepository(dir, name string) (repository, error) {
 	if err != nil {
 		return repository{}, err
 	}
-	return parseSource(name, data)
+	return parseSource(dir, keysDir, name, data)
 }
 
-func parseSource(name string, data []byte) (repository, error) {
+func parseSource(dir, keysDir, name string, data []byte) (repository, error) {
 	values := make(map[string]string)
-	var signingKeyLines []string
 	currentKey := ""
 	paragraphOpen := false
 	paragraphs := 0
@@ -269,14 +277,7 @@ func parseSource(name string, data []byte) (repository, error) {
 				return repository{}, errors.New("orphan continuation line")
 			}
 			value := strings.TrimLeft(line, " \t")
-			if currentKey == "signed-by" {
-				if value == "." {
-					value = ""
-				}
-				signingKeyLines = append(signingKeyLines, value)
-			} else {
-				values[currentKey] += " " + strings.TrimSpace(value)
-			}
+			values[currentKey] += " " + strings.TrimSpace(value)
 			continue
 		}
 		key, value, ok := strings.Cut(line, ":")
@@ -313,9 +314,24 @@ func parseSource(name string, data []byte) (repository, error) {
 	if len(uris) != 1 || len(suites) != 1 || len(components) == 0 {
 		return repository{}, errors.New("incomplete Deb822 stanza")
 	}
-	key, err := normalizeSigningKey(strings.Join(signingKeyLines, "\n"))
-	if err != nil || len(signingKeyLines) == 0 {
-		return repository{}, errors.New("missing inline signing key")
+	expectedKeyPath := keyringPath(keysDir, name)
+	if values["signed-by"] != expectedKeyPath {
+		return repository{}, errors.New("unexpected Signed-By keyring path")
+	}
+	keyInfo, err := os.Lstat(expectedKeyPath)
+	if err != nil {
+		return repository{}, err
+	}
+	if !keyInfo.Mode().IsRegular() {
+		return repository{}, errors.New("repository keyring is not a regular file")
+	}
+	keyBytes, err := os.ReadFile(expectedKeyPath)
+	if err != nil {
+		return repository{}, err
+	}
+	key, err := normalizeSigningKey(string(keyBytes))
+	if err != nil {
+		return repository{}, errors.New("invalid external signing key")
 	}
 	actual := repository{
 		Name:          name,
@@ -332,45 +348,48 @@ func parseSource(name string, data []byte) (repository, error) {
 	return actual, nil
 }
 
-func setRepository(dir string, desired repository) (repository, error) {
+func setRepository(dir, keysDir string, desired repository) (repository, error) {
 	path := sourcePath(dir, desired.Name)
+	keyPath := keyringPath(keysDir, desired.Name)
 	if desired.Ensure == "Absent" {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return repository{}, err
+		sourceErr := removeIfExists(path)
+		keyErr := removeIfExists(keyPath)
+		if sourceErr != nil || keyErr != nil {
+			return repository{}, errors.Join(sourceErr, keyErr)
 		}
 		return repository{Name: desired.Name, Ensure: "Absent"}, nil
 	}
-	current, err := getRepository(dir, desired.Name)
+	current, err := getRepository(dir, keysDir, desired.Name)
 	if err == nil && inDesiredState(desired, current) {
 		return current, nil
+	}
+	if err := os.MkdirAll(keysDir, 0755); err != nil {
+		return repository{}, err
+	}
+	if err := writeAtomicFile(keyPath, []byte(desired.SigningKey), 0644); err != nil {
+		return repository{}, err
 	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return repository{}, err
 	}
-	if err := writeSourceFile(path, desired); err != nil {
+	if err := writeSourceFile(path, keyPath, desired); err != nil {
 		return repository{}, err
 	}
 	return desired, nil
 }
 
-func writeSourceFile(path string, desired repository) error {
+func writeSourceFile(path, keyPath string, desired repository) error {
 	var content strings.Builder
 	fmt.Fprintf(&content, "Types: deb\nURIs: %s\nSuites: %s\nComponents: %s\n",
 		desired.URI, desired.Suite, strings.Join(desired.Components, " "))
 	if len(desired.Architectures) > 0 {
 		fmt.Fprintf(&content, "Architectures: %s\n", strings.Join(desired.Architectures, " "))
 	}
-	content.WriteString("Signed-By:\n")
-	for _, line := range strings.Split(desired.SigningKey, "\n") {
-		if line == "" {
-			content.WriteString(" .\n")
-		} else {
-			content.WriteByte(' ')
-			content.WriteString(line)
-			content.WriteByte('\n')
-		}
-	}
+	fmt.Fprintf(&content, "Signed-By: %s\n", keyPath)
+	return writeAtomicFile(path, []byte(content.String()), 0644)
+}
 
+func writeAtomicFile(path string, content []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	file, err := os.CreateTemp(dir, ".dscapt-*.tmp")
 	if err != nil {
@@ -378,11 +397,11 @@ func writeSourceFile(path string, desired repository) error {
 	}
 	tempPath := file.Name()
 	defer os.Remove(tempPath)
-	if err := file.Chmod(0644); err != nil {
+	if err := file.Chmod(mode); err != nil {
 		_ = file.Close()
 		return err
 	}
-	if _, err := io.WriteString(file, content.String()); err != nil {
+	if _, err := file.Write(content); err != nil {
 		_ = file.Close()
 		return err
 	}
@@ -435,6 +454,26 @@ func uniqueStrings(values []string) bool {
 
 func sourcePath(dir, name string) string {
 	return filepath.Join(dir, name+".sources")
+}
+
+func keyringPath(dir, name string) string {
+	return filepath.Join(dir, name+".asc")
+}
+
+func pathExists(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func removeIfExists(path string) error {
+	err := os.Remove(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 func writeJSON(stdout io.Writer, value any, stderr io.Writer) int {

@@ -2,13 +2,16 @@
 
 `dscapt` is a Go-based DSCv3 resource for managing one APT repository per
 Deb822 source file. It implements `Get`, `Set`, and `Test` for
-`DscExtras.Apt/Repository`. Each managed repository uses only
-`/etc/apt/sources.list.d/<name>.sources`; the resource does not inspect or
-modify other source files.
+`DscExtras.Apt/Repository`. Each managed repository uses exactly two files:
 
-The resource accepts an inline ASCII-armored OpenPGP public key and writes it
-as Deb822 `Signed-By` data. It does not download keys or read external key
-files.
+- `/etc/apt/sources.list.d/<name>.sources`
+- `/etc/apt/keyrings/<name>.asc`
+
+`signingKey` continues to accept the complete inline ASCII-armored OpenPGP
+public key. The resource writes that key to the `.asc` keyring file and points
+the Deb822 `Signed-By` field at it. It does not download keys or read any
+user-specified key path. On `ensure: Absent`, it removes only these two files
+for the given repository name.
 
 ## Build and check
 
@@ -41,4 +44,4 @@ file requires sufficient filesystem permissions.
 ```
 
 Set `"ensure": "Absent"` with only `"name"` to remove the corresponding
-`<name>.sources` file.
+`<name>.sources` and `/etc/apt/keyrings/<name>.asc` files.

@@ -37,7 +37,7 @@ func encodeInput(t *testing.T, value any) string {
 func runInput(t *testing.T, dir, operation string, value any) (int, string, string) {
 	t.Helper()
 	var stdout, stderr strings.Builder
-	code := run([]string{operation}, strings.NewReader(encodeInput(t, value)), &stdout, &stderr, dir)
+	code := run([]string{operation}, strings.NewReader(encodeInput(t, value)), &stdout, &stderr, dir, filepath.Join(dir, "keyrings"))
 	return code, stdout.String(), stderr.String()
 }
 
@@ -72,7 +72,7 @@ func TestSetWritesAndGetsOneDeb822File(t *testing.T) {
 		"Suites: trixie\n",
 		"Components: main contrib\n",
 		"Architectures: amd64\n",
-		"Signed-By:\n -----BEGIN PGP PUBLIC KEY BLOCK-----\n .\n YWJjZA==\n -----END PGP PUBLIC KEY BLOCK-----\n",
+		"Signed-By: " + filepath.Join(dir, "keyrings", "example.asc") + "\n",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("source file does not contain %q:\n%s", want, content)
@@ -85,6 +85,21 @@ func TestSetWritesAndGetsOneDeb822File(t *testing.T) {
 	if info.Mode().Perm() != 0644 {
 		t.Errorf("source file permissions = %04o, want 0644", info.Mode().Perm())
 	}
+	keyPath := filepath.Join(dir, "keyrings", "example.asc")
+	keyData, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(keyData) != testSigningKey {
+		t.Errorf("keyring file = %q, want complete ASCII-armored key", keyData)
+	}
+	keyInfo, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keyInfo.Mode().Perm() != 0644 {
+		t.Errorf("keyring file permissions = %04o, want 0644", keyInfo.Mode().Perm())
+	}
 	otherContents, err := os.ReadFile(otherPath)
 	if err != nil {
 		t.Fatal(err)
@@ -96,8 +111,15 @@ func TestSetWritesAndGetsOneDeb822File(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 2 {
-		t.Errorf("source directory contains %d files, want only the managed and unrelated files", len(entries))
+	if len(entries) != 3 {
+		t.Errorf("source directory contains %d entries, want only the managed file, unrelated file, and keyring directory", len(entries))
+	}
+	keyEntries, err := os.ReadDir(filepath.Join(dir, "keyrings"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keyEntries) != 1 || keyEntries[0].Name() != "example.asc" {
+		t.Errorf("keyring directory entries = %v, want only example.asc", keyEntries)
 	}
 
 	code, stdout, stderr = runInput(t, dir, "get", desired)
@@ -122,12 +144,29 @@ func TestSetAbsentNeedsOnlyNameAndRemovesOnlyItsFile(t *testing.T) {
 	if err := os.WriteFile(otherPath, []byte("preserve"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	keyPath := filepath.Join(dir, "keyrings", "example.asc")
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte(testSigningKey), 0644); err != nil {
+		t.Fatal(err)
+	}
+	otherKeyPath := filepath.Join(dir, "keyrings", "unrelated.asc")
+	if err := os.WriteFile(otherKeyPath, []byte("unrelated key"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	code, stdout, stderr := runInput(t, dir, "set", repository{Name: "example", Ensure: "Absent"})
 	if code != 0 || stderr != "" {
 		t.Fatalf("set Absent returned (%d, %q), want success", code, stderr)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("managed file still exists or cannot be checked: %v", err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("managed keyring still exists or cannot be checked: %v", err)
+	}
+	if data, err := os.ReadFile(otherKeyPath); err != nil || string(data) != "unrelated key" {
+		t.Fatalf("unrelated keyring changed: data=%q err=%v", data, err)
 	}
 	if data, err := os.ReadFile(otherPath); err != nil || string(data) != "preserve" {
 		t.Fatalf("unrelated file changed: data=%q err=%v", data, err)
@@ -138,6 +177,28 @@ func TestSetAbsentNeedsOnlyNameAndRemovesOnlyItsFile(t *testing.T) {
 	}
 	if actual.Name != "example" || actual.Ensure != "Absent" {
 		t.Fatalf("set output = %#v, want absent state", actual)
+	}
+}
+
+func TestTestAbsentDetectsOrphanedKeyring(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "keyrings", "example.asc")
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte(testSigningKey), 0644); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := runInput(t, dir, "test", repository{Name: "example", Ensure: "Absent"})
+	if code != 0 || stderr != "" {
+		t.Fatalf("test Absent returned (%d, %q), want success", code, stderr)
+	}
+	var result testState
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.InDesiredState {
+		t.Fatalf("test Absent returned compliant with leftover owned keyring: %#v", result)
 	}
 }
 
@@ -265,7 +326,7 @@ func TestSetRepairsMalformedManagedFile(t *testing.T) {
 	if _, _, stderr := runInput(t, dir, "set", desired); stderr != "" {
 		t.Fatalf("set failed to repair malformed source file: %s", stderr)
 	}
-	actual, err := getRepository(dir, desired.Name)
+	actual, err := getRepository(dir, filepath.Join(dir, "keyrings"), desired.Name)
 	if err != nil {
 		t.Fatalf("repaired source is invalid: %v", err)
 	}
@@ -286,7 +347,8 @@ func TestRunRejectsMalformedInputAndUnknownOperation(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr strings.Builder
-			code := run(test.args, strings.NewReader(test.input), &stdout, &stderr, t.TempDir())
+			dir := t.TempDir()
+			code := run(test.args, strings.NewReader(test.input), &stdout, &stderr, dir, filepath.Join(dir, "keyrings"))
 			if code == 0 || stdout.Len() != 0 || stderr.Len() == 0 {
 				t.Fatalf("run() = (%d, %q, %q), want error with no stdout", code, stdout.String(), stderr.String())
 			}
@@ -303,7 +365,7 @@ func TestGetRejectsSymlinkInsteadOfReadingOutsideOwnedFile(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(dir, "example.sources")); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	if _, err := getRepository(dir, "example"); err == nil {
+	if _, err := getRepository(dir, filepath.Join(dir, "keyrings"), "example"); err == nil {
 		t.Fatal("getRepository followed a symlink")
 	}
 }

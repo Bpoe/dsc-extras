@@ -2,7 +2,7 @@
   "$schema": "https://aka.ms/dsc/schemas/v3.1/bundled/resource/manifest.json",
   "type": "DscExtras.Apt/Repository",
   "version": "0.1.0",
-  "description": "Manage an APT repository using a Deb822 source file",
+  "description": "Manage an APT repository using a Deb822 source file and external keyring",
   "kind": "resource",
   "get": {
     "executable": "dscapt",
@@ -31,7 +31,7 @@
       "properties": {
         "name": {
           "title": "Repository name",
-          "description": "Safe filename identifier for this repository's .sources file.",
+          "description": "Safe filename identifier for this repository's .sources and .asc keyring files.",
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
         },
@@ -77,7 +77,7 @@
         },
         "signingKey": {
           "title": "Repository signing key",
-          "description": "Inline ASCII-armored OpenPGP public key used to verify the repository.",
+          "description": "Complete inline ASCII-armored OpenPGP public key written to this repository's external .asc keyring file.",
           "type": "string",
           "minLength": 1
         },
