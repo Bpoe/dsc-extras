@@ -49,6 +49,20 @@ func TestGetWithNameOnlyAndActualState(t *testing.T) {
 	if err != nil || !Equal(desired, actual) {
 		t.Fatalf("Get current repository = (%#v, %v), want desired state", actual, err)
 	}
+	if filepath.Ext(store.keyringPath(desired.Name)) != ".gpg" {
+		t.Fatalf("keyring path = %q, want .gpg", store.keyringPath(desired.Name))
+	}
+	keyInfo, err := os.Stat(store.keyringPath(desired.Name))
+	if err != nil || keyInfo.Mode().Perm() != 0644 {
+		t.Fatalf("keyring permissions = %v, err=%v, want 0644", keyInfo, err)
+	}
+	keyData, err := os.ReadFile(store.keyringPath(desired.Name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := canonicalPublicKeyring(keyData); err != nil {
+		t.Fatalf("stored keyring is not binary OpenPGP: %v", err)
+	}
 }
 
 func TestSetIsIdempotentAndReplacesAtomically(t *testing.T) {
@@ -62,6 +76,11 @@ func TestSetIsIdempotentAndReplacesAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	keyringPath := store.keyringPath(desired.Name)
+	keyringBefore, err := os.Stat(keyringPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.Set(desired); err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +90,10 @@ func TestSetIsIdempotentAndReplacesAtomically(t *testing.T) {
 	}
 	if !os.SameFile(before, after) {
 		t.Fatal("idempotent Set replaced the source file")
+	}
+	keyringAfter, err := os.Stat(keyringPath)
+	if err != nil || !os.SameFile(keyringBefore, keyringAfter) {
+		t.Fatalf("idempotent Set replaced the binary keyring: info=%v err=%v", keyringAfter, err)
 	}
 
 	desired.Components = []string{"main"}
