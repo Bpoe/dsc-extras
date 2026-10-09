@@ -37,6 +37,7 @@ func TestValidateSigningKey(t *testing.T) {
 		{name: "invalid armor", key: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nnot armor", wantErr: true},
 		{name: "base64 but not OpenPGP", key: "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nYWJjZA==\n-----END PGP PUBLIC KEY BLOCK-----", wantErr: true},
 		{name: "corrupted payload", key: strings.Replace(publicTestKey, "mDME", "nDME", 1), wantErr: true},
+		{name: "corrupted armor checksum", key: strings.Replace(publicTestKey, "=Qv6R", "=Qv6S", 1), wantErr: true},
 		{name: "private armor type", key: strings.Replace(publicTestKey, "PUBLIC KEY", "PRIVATE KEY", 2), wantErr: true},
 		{name: "trailing data", key: publicTestKey + "not armor", wantErr: true},
 	}

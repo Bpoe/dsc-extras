@@ -307,8 +307,12 @@ func signedByReferencesKey(value, keyringPath string) (bool, error) {
 	if value == "" {
 		return false, errors.New("empty Signed-By field while checking keyring references")
 	}
-	if strings.Contains(value, "-----BEGIN PGP PUBLIC KEY BLOCK-----") {
-		if !strings.Contains(value, "-----END PGP PUBLIC KEY BLOCK-----") {
+	const armorBegin = "-----BEGIN PGP PUBLIC KEY BLOCK-----"
+	const armorEnd = "-----END PGP PUBLIC KEY BLOCK-----"
+	if strings.Contains(value, armorBegin) || strings.Contains(value, armorEnd) {
+		trimmed := strings.TrimSpace(value)
+		if !strings.HasPrefix(trimmed, armorBegin) || !strings.HasSuffix(trimmed, armorEnd) ||
+			strings.Count(trimmed, armorBegin) != 1 || strings.Count(trimmed, armorEnd) != 1 {
 			return false, errors.New("unterminated inline key in APT source")
 		}
 		return false, nil

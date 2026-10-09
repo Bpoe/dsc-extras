@@ -19,13 +19,19 @@ or `/etc/apt/sources.list` entry references it.
 Run these commands from `resources/apt`:
 
 ```sh
-mkdir -p dist/linux-amd64
-GOOS=linux GOARCH=amd64 go build -o dist/linux-amd64/dscapt ./cmd/dscapt
-cp dscapt.dsc.resource.json dist/linux-amd64/
 gofmt -w ./cmd ./internal
 go vet ./...
 go test ./...
+go test -race ./...
+GOOS=linux GOARCH=amd64 go build ./cmd/dscapt
+GOOS=linux GOARCH=arm64 go build ./cmd/dscapt
 ```
+
+The Go module uses `github.com/ProtonMail/go-crypto` to parse and verify
+ASCII-armored public keys without invoking an external process. Reconciliation
+writes the keyring and source as separate atomic file replacements rather than
+as one transaction; an error is returned if either replacement fails, and a
+subsequent Set can safely complete the reconciliation.
 
 Install `dscapt` and `dscapt.dsc.resource.json` together in a directory on
 `PATH` for DSC to discover the resource. Creating or removing a system source
