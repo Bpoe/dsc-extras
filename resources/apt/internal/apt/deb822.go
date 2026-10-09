@@ -10,16 +10,17 @@ import (
 
 var deb822FieldName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
 
-func parseDeb822(name, expectedKeyPath string, data []byte) (Repository, bool) {
+func parseDeb822(name, expectedKeyPath string, data []byte) (Repository, bool, bool) {
 	repository := Repository{Name: name, Ensure: "Present"}
 	stanzas, syntaxOK := parseDeb822Stanzas(data)
-	if !syntaxOK || len(stanzas) != 1 {
-		if len(stanzas) > 0 {
-			populateRepository(&repository, stanzas[0])
-		}
-		return repository, false
+	if len(stanzas) != 1 {
+		return repository, false, false
 	}
 	fields := stanzas[0]
+	if !syntaxOK {
+		populateRepository(&repository, fields)
+		return repository, false, false
+	}
 	for field := range fields {
 		switch field {
 		case "types", "uris", "suites", "components", "architectures", "signed-by":
@@ -35,9 +36,10 @@ func parseDeb822(name, expectedKeyPath string, data []byte) (Repository, bool) {
 	suites := values("suites")
 	components := values("components")
 	architectures := values("architectures")
+	keyringMatches := len(values("signed-by")) == 1 && fields["signed-by"] == expectedKeyPath
 	if len(types) != 1 || types[0] != "deb" ||
 		len(uris) != 1 || len(suites) != 1 || len(components) == 0 ||
-		len(values("signed-by")) != 1 || fields["signed-by"] != expectedKeyPath {
+		!keyringMatches {
 		syntaxOK = false
 	}
 	populateRepository(&repository, fields)
@@ -49,7 +51,10 @@ func parseDeb822(name, expectedKeyPath string, data []byte) (Repository, bool) {
 	}
 	repository.Components = components
 	repository.Architectures = architectures
-	return repository, syntaxOK
+	if validateProperties(repository) != nil {
+		syntaxOK = false
+	}
+	return repository, syntaxOK, keyringMatches
 }
 
 func populateRepository(repository *Repository, fields map[string]string) {

@@ -88,22 +88,6 @@
           "readOnly": true
         }
       },
-      "allOf": [
-        {
-          "if": {
-            "properties": {
-              "ensure": {
-                "const": "Absent"
-              }
-            },
-            "required": ["ensure"]
-          },
-          "then": {},
-          "else": {
-            "required": ["uri", "suite", "components", "signingKey"]
-          }
-        }
-      ],
       "additionalProperties": false
     }
   }

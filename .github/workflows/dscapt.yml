@@ -27,7 +27,7 @@ jobs:
           go-version-file: resources/apt/go.mod
           cache-dependency-path: resources/apt/go.mod
       - name: Verify formatting
-        run: test -z "$(gofmt -l ./cmd)"
+        run: test -z "$(gofmt -l ./cmd ./internal)"
       - name: Vet
         run: go vet ./...
       - name: Test

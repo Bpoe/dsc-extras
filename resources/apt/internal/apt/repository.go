@@ -43,6 +43,18 @@ func ValidateDesired(repository *Repository) error {
 	if repository.Ensure == "Absent" {
 		return nil
 	}
+	if err := validateProperties(*repository); err != nil {
+		return err
+	}
+	key, err := ValidateSigningKey(repository.SigningKey)
+	if err != nil {
+		return errors.New("signingKey must be a valid inline ASCII-armored OpenPGP public key")
+	}
+	repository.SigningKey = key
+	return nil
+}
+
+func validateProperties(repository Repository) error {
 	if err := validateURI(repository.URI); err != nil {
 		return errors.New("uri must be an absolute HTTP, HTTPS, or file URL without user information or fragment")
 	}
@@ -65,11 +77,6 @@ func ValidateDesired(repository *Repository) error {
 			return errors.New("architectures must contain valid architecture tokens")
 		}
 	}
-	key, err := ValidateSigningKey(repository.SigningKey)
-	if err != nil {
-		return errors.New("signingKey must be a valid inline ASCII-armored OpenPGP public key")
-	}
-	repository.SigningKey = key
 	return nil
 }
 

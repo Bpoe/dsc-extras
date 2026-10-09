@@ -23,7 +23,7 @@ func validDesired() Repository {
 		Suite:         "stable",
 		Components:    []string{"main", "contrib"},
 		Architectures: []string{"amd64"},
-		SigningKey:    publicTestKey,
+		SigningKey:    publicTestKey + "\n",
 	}
 }
 
@@ -34,9 +34,9 @@ func TestValidateSigningKey(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "valid public key", key: publicTestKey},
-		{name: "invalid armor", key: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nnot armor"},
-		{name: "base64 but not OpenPGP", key: "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nYWJjZA==\n-----END PGP PUBLIC KEY BLOCK-----"},
-		{name: "corrupted payload", key: strings.Replace(publicTestKey, "Qv6R", "Qv6S", 1), wantErr: true},
+		{name: "invalid armor", key: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nnot armor", wantErr: true},
+		{name: "base64 but not OpenPGP", key: "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nYWJjZA==\n-----END PGP PUBLIC KEY BLOCK-----", wantErr: true},
+		{name: "corrupted payload", key: strings.Replace(publicTestKey, "mDME", "nDME", 1), wantErr: true},
 		{name: "private armor type", key: strings.Replace(publicTestKey, "PUBLIC KEY", "PRIVATE KEY", 2), wantErr: true},
 		{name: "trailing data", key: publicTestKey + "not armor", wantErr: true},
 	}

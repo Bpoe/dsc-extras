@@ -22,7 +22,7 @@ Run these commands from `resources/apt`:
 mkdir -p dist/linux-amd64
 GOOS=linux GOARCH=amd64 go build -o dist/linux-amd64/dscapt ./cmd/dscapt
 cp dscapt.dsc.resource.json dist/linux-amd64/
-gofmt -w ./cmd
+gofmt -w ./cmd ./internal
 go vet ./...
 go test ./...
 ```

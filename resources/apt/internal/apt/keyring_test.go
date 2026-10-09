@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
+	openpgp "github.com/ProtonMail/go-crypto/openpgp/v2"
 )
 
 func TestValidateSigningKeyRejectsSecretKeyMaterial(t *testing.T) {
