@@ -1,0 +1,76 @@
+name: dsckvsec
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/dsckvsec.yml"
+      - "extensions/azure-keyvault/**"
+  push:
+    paths:
+      - ".github/workflows/dsckvsec.yml"
+      - "extensions/azure-keyvault/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions/azure-keyvault
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: extensions/azure-keyvault/go.mod
+          cache-dependency-path: extensions/azure-keyvault/go.sum
+      - name: Verify formatting
+        run: test -z "$(gofmt -l ./cmd)"
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            executable: dsckvsec
+          - goos: linux
+            goarch: arm64
+            executable: dsckvsec
+          - goos: windows
+            goarch: amd64
+            executable: dsckvsec.exe
+          - goos: windows
+            goarch: arm64
+            executable: dsckvsec.exe
+    defaults:
+      run:
+        working-directory: extensions/azure-keyvault
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: extensions/azure-keyvault/go.mod
+          cache-dependency-path: extensions/azure-keyvault/go.sum
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p "dist/${GOOS}-${GOARCH}"
+          go build -o "dist/${GOOS}-${GOARCH}/${{ matrix.executable }}" ./cmd/dsckvsec
+          cp dsckvsec.dsc.extension.json "dist/${GOOS}-${GOARCH}/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsckvsec-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: extensions/azure-keyvault/dist/${{ matrix.goos }}-${{ matrix.goarch }}/
+          if-no-files-found: error
