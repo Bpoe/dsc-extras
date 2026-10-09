@@ -82,11 +82,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, dir, keysDir 
 		}
 		inDesired := inDesiredState(desired, current)
 		if desired.Ensure == "Absent" {
-			exists, err := pathExists(keyringPath(keysDir, desired.Name))
+			keyPath := keyringPath(keysDir, desired.Name)
+			exists, err := pathExists(keyPath)
 			if err != nil {
 				return reportError(stderr, "failed to inspect the repository keyring file")
 			}
-			inDesired = inDesired && !exists
+			referenced := false
+			if exists && inDesired {
+				referenced, err = keyringReferenced(dir, sourcePath(dir, desired.Name), keyPath)
+				if err != nil {
+					return reportError(stderr, "failed to check references to the repository keyring")
+				}
+			}
+			inDesired = inDesired && (!exists || referenced)
 		}
 		return writeJSON(stdout, testState{
 			repository:     current,
@@ -142,7 +150,7 @@ func validateRepository(desired *repository) error {
 		return nil
 	}
 	if err := validateURI(desired.URI); err != nil {
-		return errors.New("uri must be an absolute HTTP or HTTPS URL without user information, query, or fragment")
+		return errors.New("uri must be an absolute HTTP, HTTPS, or file URL without user information or fragment")
 	}
 	if !suitePattern.MatchString(desired.Suite) {
 		return errors.New("suite must be a non-empty APT suite token")
@@ -352,10 +360,17 @@ func setRepository(dir, keysDir string, desired repository) (repository, error) 
 	path := sourcePath(dir, desired.Name)
 	keyPath := keyringPath(keysDir, desired.Name)
 	if desired.Ensure == "Absent" {
-		sourceErr := removeIfExists(path)
-		keyErr := removeIfExists(keyPath)
-		if sourceErr != nil || keyErr != nil {
-			return repository{}, errors.Join(sourceErr, keyErr)
+		referenced, err := keyringReferenced(dir, path, keyPath)
+		if err != nil {
+			return repository{}, err
+		}
+		if err := removeIfExists(path); err != nil {
+			return repository{}, err
+		}
+		if !referenced {
+			if err := removeIfExists(keyPath); err != nil {
+				return repository{}, err
+			}
 		}
 		return repository{Name: desired.Name, Ensure: "Absent"}, nil
 	}
@@ -474,6 +489,148 @@ func removeIfExists(path string) error {
 		return nil
 	}
 	return err
+}
+
+func keyringReferenced(sourceDir, ownSourcePath, keyPath string) (bool, error) {
+	ownSourcePath, err := filepath.Abs(ownSourcePath)
+	if err != nil {
+		return false, err
+	}
+	keyPath, err = filepath.Abs(keyPath)
+	if err != nil {
+		return false, err
+	}
+	entries, err := os.ReadDir(sourceDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	for _, entry := range entries {
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		if ext != ".sources" && ext != ".list" {
+			continue
+		}
+		path := filepath.Join(sourceDir, entry.Name())
+		absolutePath, err := filepath.Abs(path)
+		if err != nil {
+			return false, err
+		}
+		if absolutePath == ownSourcePath {
+			continue
+		}
+		referenced, err := sourceFileReferencesKey(path, ext, keyPath)
+		if err != nil {
+			return false, err
+		}
+		if referenced {
+			return true, nil
+		}
+	}
+
+	primarySources := filepath.Join(filepath.Dir(sourceDir), "sources.list")
+	primarySources, err = filepath.Abs(primarySources)
+	if err != nil {
+		return false, err
+	}
+	if primarySources != ownSourcePath {
+		return sourceFileReferencesKey(primarySources, ".list", keyPath)
+	}
+	return false, nil
+}
+
+func sourceFileReferencesKey(path, extension, keyPath string) (bool, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, errors.New("APT source entry is not a regular file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	if extension == ".sources" {
+		return deb822ReferencesKey(data, keyPath)
+	}
+	return oneLineSourceReferencesKey(data, keyPath)
+}
+
+func deb822ReferencesKey(data []byte, keyPath string) (bool, error) {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 4096), maxInputBytes)
+	field := ""
+	referenced := false
+	for scanner.Scan() {
+		line := strings.TrimSuffix(scanner.Text(), "\r")
+		if strings.TrimSpace(line) == "" {
+			field = ""
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if line[0] == ' ' || line[0] == '\t' {
+			if strings.EqualFold(field, "signed-by") && referencesKeyPath(trimmed, keyPath) {
+				referenced = true
+			}
+			continue
+		}
+		name, value, ok := strings.Cut(line, ":")
+		if !ok {
+			field = ""
+			continue
+		}
+		field = strings.TrimSpace(name)
+		if strings.EqualFold(field, "signed-by") && referencesKeyPath(strings.TrimSpace(value), keyPath) {
+			referenced = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, err
+	}
+	return referenced, nil
+}
+
+func oneLineSourceReferencesKey(data []byte, keyPath string) (bool, error) {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 4096), maxInputBytes)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		open := strings.IndexByte(line, '[')
+		close := strings.IndexByte(line, ']')
+		if open < 0 || close <= open {
+			continue
+		}
+		for _, option := range strings.Fields(line[open+1 : close]) {
+			name, value, ok := strings.Cut(option, "=")
+			if !ok || !strings.EqualFold(name, "signed-by") {
+				continue
+			}
+			if referencesKeyPath(value, keyPath) {
+				return true, nil
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func referencesKeyPath(value, keyPath string) bool {
+	for _, token := range strings.Split(value, ",") {
+		if filepath.Clean(token) == keyPath {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJSON(stdout io.Writer, value any, stderr io.Writer) int {

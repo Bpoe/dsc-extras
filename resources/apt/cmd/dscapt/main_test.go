@@ -202,6 +202,86 @@ func TestTestAbsentDetectsOrphanedKeyring(t *testing.T) {
 	}
 }
 
+func TestSetAbsentPreservesKeyringReferencedByOtherRepositories(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		extension string
+		content   func(string) string
+	}{
+		{
+			name:      "Deb822 source",
+			extension: ".sources",
+			content: func(path string) string {
+				return "Types: deb\nURIs: https://other.example/debian\nSuites: stable\nComponents: main\nSigned-By: " + path + "\n"
+			},
+		},
+		{
+			name:      "one-line source",
+			extension: ".list",
+			content: func(path string) string {
+				return "deb [signed-by=" + path + "] https://other.example/debian stable main\n"
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			desired := validRepository()
+			if _, _, stderr := runInput(t, dir, "set", desired); stderr != "" {
+				t.Fatalf("failed to create repository: %s", stderr)
+			}
+			keyPath := filepath.Join(dir, "keyrings", "example.asc")
+			otherSource := filepath.Join(dir, "other"+test.extension)
+			if err := os.WriteFile(otherSource, []byte(test.content(keyPath)), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			code, _, stderr := runInput(t, dir, "set", repository{Name: "example", Ensure: "Absent"})
+			if code != 0 || stderr != "" {
+				t.Fatalf("set Absent returned (%d, %q), want success", code, stderr)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "example.sources")); !os.IsNotExist(err) {
+				t.Fatalf("managed source still exists or cannot be checked: %v", err)
+			}
+			if data, err := os.ReadFile(keyPath); err != nil || string(data) != testSigningKey {
+				t.Fatalf("shared keyring was not preserved: data=%q err=%v", data, err)
+			}
+			code, stdout, stderr := runInput(t, dir, "test", repository{Name: "example", Ensure: "Absent"})
+			if code != 0 || stderr != "" {
+				t.Fatalf("test Absent returned (%d, %q), want success", code, stderr)
+			}
+			var result testState
+			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+				t.Fatal(err)
+			}
+			if !result.InDesiredState {
+				t.Fatalf("test Absent returned noncompliant despite shared keyring: %#v", result)
+			}
+		})
+	}
+}
+
+func TestPrimaryOneLineSourcesReferenceIsRecognized(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "repo.asc")
+	data := []byte("deb [arch=amd64 signed-by=" + keyPath + "] https://other.example stable main\n")
+	referenced, err := oneLineSourceReferencesKey(data, keyPath)
+	if err != nil || !referenced {
+		t.Fatalf("oneLineSourceReferencesKey() = (%t, %v), want true, nil", referenced, err)
+	}
+
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "sources.list.d")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sources.list"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	referenced, err = keyringReferenced(sourceDir, filepath.Join(sourceDir, "managed.sources"), keyPath)
+	if err != nil || !referenced {
+		t.Fatalf("keyringReferenced() for sources.list = (%t, %v), want true, nil", referenced, err)
+	}
+}
+
 func TestTestReturnsActualStateAndCompliance(t *testing.T) {
 	dir := t.TempDir()
 	desired := validRepository()

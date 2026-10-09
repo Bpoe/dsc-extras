@@ -10,8 +10,9 @@ Deb822 source file. It implements `Get`, `Set`, and `Test` for
 `signingKey` continues to accept the complete inline ASCII-armored OpenPGP
 public key. The resource writes that key to the `.asc` keyring file and points
 the Deb822 `Signed-By` field at it. It does not download keys or read any
-user-specified key path. On `ensure: Absent`, it removes only these two files
-for the given repository name.
+user-specified key path. On `ensure: Absent`, it removes the repository's
+`.sources` file and removes its keyring only when no other `.sources`, `.list`,
+or `/etc/apt/sources.list` entry references it.
 
 ## Build and check
 
@@ -44,4 +45,5 @@ file requires sufficient filesystem permissions.
 ```
 
 Set `"ensure": "Absent"` with only `"name"` to remove the corresponding
-`<name>.sources` and `/etc/apt/keyrings/<name>.asc` files.
+`<name>.sources` file and, if it is not shared, the
+`/etc/apt/keyrings/<name>.asc` keyring.
