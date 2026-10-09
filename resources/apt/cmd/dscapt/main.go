@@ -372,7 +372,7 @@ func writeSourceFile(path string, desired repository) error {
 	}
 
 	dir := filepath.Dir(path)
-	file, err := os.CreateTemp(dir, ".dscapt-*.sources")
+	file, err := os.CreateTemp(dir, ".dscapt-*.tmp")
 	if err != nil {
 		return err
 	}

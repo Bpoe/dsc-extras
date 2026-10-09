@@ -92,6 +92,13 @@ func TestSetWritesAndGetsOneDeb822File(t *testing.T) {
 	if string(otherContents) != "other repository" {
 		t.Errorf("unowned file changed: %q", otherContents)
 	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Errorf("source directory contains %d files, want only the managed and unrelated files", len(entries))
+	}
 
 	code, stdout, stderr = runInput(t, dir, "get", desired)
 	if code != 0 || stderr != "" {
