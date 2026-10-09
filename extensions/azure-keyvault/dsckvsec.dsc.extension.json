@@ -1,0 +1,13 @@
+{
+  "$schema": "https://aka.ms/dsc/schemas/v3.2/bundled/extension/manifest.json",
+  "type": "DscExtras.Azure/KeyVault",
+  "version": "0.1.0",
+  "description": "Retrieve secrets from Azure Key Vault",
+  "secret": {
+    "executable": "dsckvsec",
+    "args": [
+      { "nameArg": "--name" },
+      { "vaultArg": "--vault" }
+    ]
+  }
+}
