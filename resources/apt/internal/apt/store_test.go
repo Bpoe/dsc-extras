@@ -23,6 +23,15 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+func writePublicKeyring(t *testing.T, store Store, name, armored string) {
+	t.Helper()
+	keyring, err := signingKeyBinary(armored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, store.keyringPath(name), string(keyring))
+}
+
 func TestGetWithNameOnlyAndActualState(t *testing.T) {
 	store := newTestStore(t)
 	desired := validDesired()
@@ -172,6 +181,20 @@ func TestTestReportsRepairableDriftAndSetRepairs(t *testing.T) {
 			},
 			keyring: func(Store) string { return publicTestKey },
 		},
+		{
+			name: "missing signing key path",
+			source: func(Store) string {
+				return "Types: deb\nURIs: https://packages.example.org/debian\nSuites: stable\nComponents: main contrib\n"
+			},
+			keyring: func(Store) string { return publicTestKey },
+		},
+		{
+			name: "another repository key path",
+			source: func(Store) string {
+				return "Types: deb\nURIs: https://packages.example.org/debian\nSuites: stable\nComponents: main contrib\nSigned-By: /etc/apt/keyrings/other.gpg\n"
+			},
+			keyring: func(Store) string { return publicTestKey },
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -181,7 +204,12 @@ func TestTestReportsRepairableDriftAndSetRepairs(t *testing.T) {
 				writeFile(t, store.sourcePath(desired.Name), test.source(store))
 			}
 			if test.keyring != nil {
-				writeFile(t, store.keyringPath(desired.Name), test.keyring(store))
+				keyring := test.keyring(store)
+				if keyring == "not a key" {
+					writeFile(t, store.keyringPath(desired.Name), keyring)
+				} else {
+					writePublicKeyring(t, store, desired.Name, keyring)
+				}
 			}
 			_, compliant, err := store.Test(desired)
 			if err != nil {
@@ -196,6 +224,17 @@ func TestTestReportsRepairableDriftAndSetRepairs(t *testing.T) {
 			actual, compliant, err := store.Test(desired)
 			if err != nil || !compliant {
 				t.Fatalf("Test after repair = (%#v, %t, %v), want compliant", actual, compliant, err)
+			}
+			sourceBefore, err := os.Stat(store.sourcePath(desired.Name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Set(desired); err != nil {
+				t.Fatalf("repeated Set after repair failed: %v", err)
+			}
+			sourceAfter, err := os.Stat(store.sourcePath(desired.Name))
+			if err != nil || !os.SameFile(sourceBefore, sourceAfter) {
+				t.Fatalf("repeated Set replaced repaired source: info=%v err=%v", sourceAfter, err)
 			}
 		})
 	}
@@ -216,7 +255,7 @@ func TestGetMalformedSourceReturnsPartialObservedState(t *testing.T) {
 func TestDeb822WhitespaceCommentsAndMultilineValues(t *testing.T) {
 	store := newTestStore(t)
 	desired := validDesired()
-	writeFile(t, store.keyringPath(desired.Name), desired.SigningKey)
+	writePublicKeyring(t, store, desired.Name, desired.SigningKey)
 	data := "# managed source\n\n  # comment\nSigned-By:  " + store.keyringPath(desired.Name) +
 		"\nComponents: main\n contrib\nTypes: deb\nURIs: https://packages.example.org/debian\nSuites: stable\nArchitectures: amd64\n"
 	writeFile(t, store.sourcePath(desired.Name), data)
@@ -229,7 +268,7 @@ func TestDeb822WhitespaceCommentsAndMultilineValues(t *testing.T) {
 func TestDuplicateFieldsAreDriftNotFatal(t *testing.T) {
 	store := newTestStore(t)
 	desired := validDesired()
-	writeFile(t, store.keyringPath(desired.Name), desired.SigningKey)
+	writePublicKeyring(t, store, desired.Name, desired.SigningKey)
 	source := string(serializeDeb822(desired, store.keyringPath(desired.Name))) + "Trusted: no\nTrusted: yes\n"
 	writeFile(t, store.sourcePath(desired.Name), source)
 	actual, compliant, err := store.Test(desired)
@@ -238,96 +277,62 @@ func TestDuplicateFieldsAreDriftNotFatal(t *testing.T) {
 	}
 }
 
-func TestSetAbsentPreservesSharedKeyring(t *testing.T) {
+func TestAbsentOwnsAndRemovesExactlyItsFiles(t *testing.T) {
 	for _, test := range []struct {
-		name             string
-		source           func(string) string
-		primary          bool
-		preservesKeyring bool
+		name         string
+		sourceExists bool
+		keyExists    bool
 	}{
-		{
-			name:             "Deb822 whitespace-separated references",
-			preservesKeyring: true,
-			source: func(keyPath string) string {
-				return "Types: deb\nURIs: https://other.example/debian\nSuites: stable\nComponents: main\n" +
-					"Signed-By:\n  /etc/apt/keyrings/other.asc\n  " + keyPath + "\n"
-			},
-		},
-		{
-			name: "Deb822 inline public key is not a file reference",
-			source: func(string) string {
-				inlineKey := strings.ReplaceAll(publicTestKey, "\n\n", "\n.\n")
-				return "Types: deb\nURIs: https://other.example/debian\nSuites: stable\nComponents: main\n" +
-					"Signed-By:\n  " + strings.ReplaceAll(inlineKey, "\n", "\n  ") + "\n"
-			},
-		},
-		{
-			name:             "legacy list references",
-			preservesKeyring: true,
-			source: func(keyPath string) string {
-				return "deb [arch=amd64 signed-by=/etc/apt/keyrings/other.asc," + keyPath + "] https://other.example stable main\n"
-			},
-		},
-		{
-			name:             "primary sources references",
-			primary:          true,
-			preservesKeyring: true,
-			source: func(keyPath string) string {
-				return "deb [signed-by=" + keyPath + "] https://other.example stable main\n"
-			},
-		},
+		{name: "both files present", sourceExists: true, keyExists: true},
+		{name: "only source present", sourceExists: true},
+		{name: "only keyring present", keyExists: true},
+		{name: "both files absent"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store := newTestStore(t)
 			desired := validDesired()
-			if _, err := store.Set(desired); err != nil {
+			if test.sourceExists {
+				writeFile(t, store.sourcePath(desired.Name), string(serializeDeb822(desired, store.keyringPath(desired.Name))))
+			}
+			if test.keyExists {
+				writePublicKeyring(t, store, desired.Name, desired.SigningKey)
+			}
+
+			otherSource := filepath.Join(store.SourcesDir, "other.sources")
+			otherKeyring := filepath.Join(store.KeyringsDir, "other.gpg")
+			writeFile(t, otherSource, "unrelated source data")
+			writeFile(t, otherKeyring, "unrelated key data")
+			// Removal is owned-file based and does not parse other APT sources.
+			writeFile(t, filepath.Join(store.SourcesDir, "malformed.sources"), "not valid Deb822")
+
+			absent := Repository{Name: desired.Name, Ensure: "Absent"}
+			_, compliant, err := store.Test(absent)
+			if err != nil {
 				t.Fatal(err)
 			}
-			target := filepath.Join(store.SourcesDir, "other.sources")
-			if strings.Contains(test.name, "list") {
-				target = filepath.Join(store.SourcesDir, "other.list")
+			if compliant != (!test.sourceExists && !test.keyExists) {
+				t.Fatalf("Test compliance=%t with source=%t keyring=%t", compliant, test.sourceExists, test.keyExists)
 			}
-			if test.primary {
-				target = filepath.Join(filepath.Dir(store.SourcesDir), "sources.list")
-			}
-			writeFile(t, target, test.source(store.keyringPath(desired.Name)))
-			absent := Repository{Name: desired.Name, Ensure: "Absent"}
 			if _, err := store.Set(absent); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := os.Stat(store.sourcePath(desired.Name)); !os.IsNotExist(err) {
-				t.Fatalf("owned source not removed: %v", err)
-			}
-			data, err := os.ReadFile(store.keyringPath(desired.Name))
-			if test.preservesKeyring && (err != nil || strings.TrimSpace(string(data)) != strings.TrimSpace(publicTestKey)) {
-				t.Fatalf("shared keyring deleted or changed: err=%v", err)
-			}
-			if !test.preservesKeyring && !os.IsNotExist(err) {
-				t.Fatalf("unreferenced keyring was not removed: err=%v", err)
-			}
 			if _, compliant, err := store.Test(absent); err != nil || !compliant {
-				t.Fatalf("Test absent shared keyring=(%t,%v), want compliant", compliant, err)
+				t.Fatalf("Test after removal=(%t,%v), want compliant", compliant, err)
+			}
+			if _, err := store.Set(absent); err != nil {
+				t.Fatalf("repeated removal failed: %v", err)
+			}
+			for _, path := range []string{store.sourcePath(desired.Name), store.keyringPath(desired.Name)} {
+				if _, err := os.Lstat(path); !os.IsNotExist(err) {
+					t.Fatalf("managed path remains at %s: %v", path, err)
+				}
+			}
+			for _, path := range []string{otherSource, otherKeyring} {
+				if _, err := os.Stat(path); err != nil {
+					t.Fatalf("unrelated path changed at %s: %v", path, err)
+				}
 			}
 		})
-	}
-}
-
-func TestSetAbsentDoesNotDeleteKeyWhenReferencesAreMalformed(t *testing.T) {
-	store := newTestStore(t)
-	desired := validDesired()
-	if _, err := store.Set(desired); err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, filepath.Join(store.SourcesDir, "broken.sources"), "this is not a valid Deb822 field\n")
-	absent := Repository{Name: desired.Name, Ensure: "Absent"}
-	if _, err := store.Set(absent); err == nil {
-		t.Fatal("Set Absent succeeded despite uncertain reference scan")
-	}
-	if _, err := os.Stat(store.sourcePath(desired.Name)); err != nil {
-		t.Fatalf("managed source removed before safe key scan: %v", err)
-	}
-	if _, err := os.Stat(store.keyringPath(desired.Name)); err != nil {
-		t.Fatalf("keyring removed despite uncertain reference scan: %v", err)
 	}
 }
 

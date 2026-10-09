@@ -5,14 +5,19 @@ Deb822 source file. It implements `Get`, `Set`, and `Test` for
 `DscExtras.Apt/Repository`. Each managed repository uses exactly two files:
 
 - `/etc/apt/sources.list.d/<name>.sources`
-- `/etc/apt/keyrings/<name>.asc`
+- `/etc/apt/keyrings/<name>.gpg`
 
 `signingKey` continues to accept the complete inline ASCII-armored OpenPGP
-public key. The resource writes that key to the `.asc` keyring file and points
-the Deb822 `Signed-By` field at it. It does not download keys or read any
-user-specified key path. On `ensure: Absent`, it removes the repository's
-`.sources` file and removes its keyring only when no other `.sources`, `.list`,
-or `/etc/apt/sources.list` entry references it.
+public key. The resource validates and decodes it into a binary `.gpg` keyring,
+then points the Deb822 `Signed-By` field at that file. `Get` returns the actual
+key as ASCII armor, and `Test` compares parsed public-key material rather than
+armor formatting. No key downloads or user-specified key paths are supported.
+
+Each repository exclusively owns its `.sources` and `.gpg` files. Other
+repositories must not reference a keyring owned by this resource. On
+`ensure: Absent`, both managed files are removed without inspecting unrelated
+APT sources. Deb822 sources with external binary keyrings target APT 1.4 or
+newer as the conservative supported baseline.
 
 ## Build and check
 
@@ -51,5 +56,5 @@ file requires sufficient filesystem permissions.
 ```
 
 Set `"ensure": "Absent"` with only `"name"` to remove the corresponding
-`<name>.sources` file and, if it is not shared, the
-`/etc/apt/keyrings/<name>.asc` keyring.
+`<name>.sources` file and the
+`/etc/apt/keyrings/<name>.gpg` keyring.

@@ -31,7 +31,7 @@
       "properties": {
         "name": {
           "title": "Repository name",
-          "description": "Safe filename identifier for this repository's .sources and .asc keyring files.",
+          "description": "Safe filename identifier for this repository's .sources and .gpg keyring files.",
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
         },
@@ -77,7 +77,7 @@
         },
         "signingKey": {
           "title": "Repository signing key",
-          "description": "Complete inline ASCII-armored OpenPGP public key written to this repository's external .asc keyring file.",
+          "description": "Complete inline ASCII-armored OpenPGP public key written as a binary external .gpg keyring file.",
           "type": "string",
           "minLength": 1
         },

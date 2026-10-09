@@ -1,6 +1,7 @@
 package apt
 
 import (
+	"bytes"
 	"errors"
 	"net/url"
 	"regexp"
@@ -130,12 +131,18 @@ func equalStrings(left, right []string) bool {
 }
 
 func Equal(desired, actual Repository) bool {
-	return desired.Name == actual.Name &&
+	if desired.Name != actual.Name || desired.Ensure != actual.Ensure {
+		return false
+	}
+	if desired.Ensure == "Absent" {
+		return true
+	}
+	desiredKey, desiredErr := signingKeyBinary(desired.SigningKey)
+	actualKey, actualErr := signingKeyBinary(actual.SigningKey)
+	return desiredErr == nil && actualErr == nil && bytes.Equal(desiredKey, actualKey) &&
 		desired.Ensure == actual.Ensure &&
-		(desired.Ensure == "Absent" ||
-			desired.URI == actual.URI &&
-				desired.Suite == actual.Suite &&
-				equalStrings(desired.Components, actual.Components) &&
-				equalStrings(desired.Architectures, actual.Architectures) &&
-				desired.SigningKey == actual.SigningKey)
+		desired.URI == actual.URI &&
+		desired.Suite == actual.Suite &&
+		equalStrings(desired.Components, actual.Components) &&
+		equalStrings(desired.Architectures, actual.Architectures)
 }

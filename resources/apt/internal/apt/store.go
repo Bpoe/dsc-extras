@@ -1,6 +1,7 @@
 package apt
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -18,11 +19,12 @@ type Store struct {
 }
 
 type observedState struct {
-	repository      Repository
-	sourceExists    bool
-	sourceCanonical bool
-	keyringValid    bool
-	keyringContents string
+	repository         Repository
+	sourceExists       bool
+	sourceCanonical    bool
+	keyringPathMatches bool
+	keyringValid       bool
+	keyringContents    []byte
 }
 
 func NewStore(sourcesDir, keyringsDir string) Store {
@@ -52,7 +54,13 @@ func (s Store) Test(desired Repository) (Repository, bool, error) {
 		return Repository{}, false, err
 	}
 	if desired.Ensure == "Present" {
-		return state.repository, state.sourceCanonical && state.keyringValid && Equal(desired, state.repository), nil
+		desiredKey, err := signingKeyBinary(desired.SigningKey)
+		if err != nil {
+			return Repository{}, false, err
+		}
+		return state.repository, state.sourceCanonical && state.keyringPathMatches &&
+			state.keyringValid && sourcePropertiesEqual(desired, state.repository) &&
+			bytes.Equal(desiredKey, state.keyringContents), nil
 	}
 	if state.sourceExists {
 		return state.repository, false, nil
@@ -61,14 +69,7 @@ func (s Store) Test(desired Repository) (Repository, bool, error) {
 	if err != nil {
 		return Repository{}, false, err
 	}
-	if !keyExists {
-		return state.repository, true, nil
-	}
-	referenced, err := keyringReferenced(s.SourcesDir, s.sourcePath(desired.Name), s.keyringPath(desired.Name))
-	if err != nil {
-		return Repository{}, false, err
-	}
-	return state.repository, referenced, nil
+	return state.repository, !keyExists, nil
 }
 
 func (s Store) Set(desired Repository) (Repository, error) {
@@ -76,28 +77,19 @@ func (s Store) Set(desired Repository) (Repository, error) {
 		return Repository{}, err
 	}
 	if desired.Ensure == "Absent" {
-		keyExists, err := s.keyringExists(desired.Name)
-		if err != nil {
-			return Repository{}, err
-		}
-		referenced := false
-		if keyExists {
-			referenced, err = keyringReferenced(s.SourcesDir, s.sourcePath(desired.Name), s.keyringPath(desired.Name))
-			if err != nil {
-				return Repository{}, err
-			}
-		}
 		if err := removeManagedFile(s.sourcePath(desired.Name)); err != nil {
 			return Repository{}, fmt.Errorf("remove repository source: %w", err)
 		}
-		if keyExists && !referenced {
-			if err := removeManagedFile(s.keyringPath(desired.Name)); err != nil {
-				return Repository{}, fmt.Errorf("remove repository keyring: %w", err)
-			}
+		if err := removeManagedFile(s.keyringPath(desired.Name)); err != nil {
+			return Repository{}, fmt.Errorf("remove repository keyring: %w", err)
 		}
 		return Repository{Name: desired.Name, Ensure: "Absent"}, nil
 	}
 
+	desiredKey, err := signingKeyBinary(desired.SigningKey)
+	if err != nil {
+		return Repository{}, err
+	}
 	state, err := s.observe(desired.Name)
 	if err != nil {
 		return Repository{}, err
@@ -108,18 +100,19 @@ func (s Store) Set(desired Repository) (Repository, error) {
 			return Repository{}, err
 		}
 	}
-	if state.sourceCanonical && state.keyringValid && Equal(desired, state.repository) {
+	if state.sourceCanonical && state.keyringPathMatches && state.keyringValid &&
+		sourcePropertiesEqual(desired, state.repository) && bytes.Equal(desiredKey, state.keyringContents) {
 		return state.repository, nil
 	}
-	if !state.keyringValid || state.keyringContents != desired.SigningKey {
+	if !state.keyringValid || !bytes.Equal(state.keyringContents, desiredKey) {
 		if err := os.MkdirAll(s.KeyringsDir, 0755); err != nil {
 			return Repository{}, fmt.Errorf("create APT keyring directory: %w", err)
 		}
-		if err := atomicWrite(s.keyringPath(desired.Name), []byte(desired.SigningKey), 0644); err != nil {
+		if err := atomicWrite(s.keyringPath(desired.Name), desiredKey, 0644); err != nil {
 			return Repository{}, fmt.Errorf("write repository keyring: %w", err)
 		}
 	}
-	if !state.sourceCanonical || !sourcePropertiesEqual(desired, state.repository) {
+	if !state.sourceCanonical || !state.keyringPathMatches || !sourcePropertiesEqual(desired, state.repository) {
 		if err := os.MkdirAll(s.SourcesDir, 0755); err != nil {
 			return Repository{}, fmt.Errorf("create APT source directory: %w", err)
 		}
@@ -131,7 +124,8 @@ func (s Store) Set(desired Repository) (Repository, error) {
 	if err != nil {
 		return Repository{}, fmt.Errorf("read reconciled repository: %w", err)
 	}
-	if !state.sourceCanonical || !state.keyringValid || !Equal(desired, state.repository) {
+	if !state.sourceCanonical || !state.keyringPathMatches || !state.keyringValid ||
+		!sourcePropertiesEqual(desired, state.repository) || !bytes.Equal(desiredKey, state.keyringContents) {
 		return Repository{}, errors.New("repository did not converge to desired state")
 	}
 	return state.repository, nil
@@ -163,6 +157,7 @@ func (s Store) observe(name string) (observedState, error) {
 	parsed, supported, keyringMatches := parseDeb822(name, s.keyringPath(name), data)
 	state.repository = parsed
 	state.sourceCanonical = supported && info.Mode().Perm() == 0644
+	state.keyringPathMatches = keyringMatches
 	if !keyringMatches {
 		return state, nil
 	}
@@ -173,30 +168,33 @@ func (s Store) observe(name string) (observedState, error) {
 	if valid {
 		state.keyringValid = true
 		state.keyringContents = key
-		state.repository.SigningKey = key
+		state.repository.SigningKey, err = armoredKeyring(key)
+		if err != nil {
+			return observedState{}, err
+		}
 	}
 	return state, nil
 }
 
-func (s Store) readKeyring(name string) (string, bool, error) {
+func (s Store) readKeyring(name string) ([]byte, bool, error) {
 	keyPath := s.keyringPath(name)
 	keyInfo, err := os.Lstat(keyPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return "", false, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("inspect repository keyring: %w", err)
+		return nil, false, fmt.Errorf("inspect repository keyring: %w", err)
 	}
 	if !keyInfo.Mode().IsRegular() || keyInfo.Mode().Perm() != 0644 {
-		return "", false, nil
+		return nil, false, nil
 	}
 	keyData, err := os.ReadFile(keyPath)
 	if err != nil {
-		return "", false, fmt.Errorf("read repository keyring: %w", err)
+		return nil, false, fmt.Errorf("read repository keyring: %w", err)
 	}
-	key, err := ValidateSigningKey(string(keyData))
+	key, err := canonicalPublicKeyring(keyData)
 	if err != nil {
-		return "", false, nil
+		return nil, false, nil
 	}
 	return key, true, nil
 }
@@ -225,7 +223,7 @@ func (s Store) sourcePath(name string) string {
 }
 
 func (s Store) keyringPath(name string) string {
-	return filepath.Join(s.KeyringsDir, name+".asc")
+	return filepath.Join(s.KeyringsDir, name+".gpg")
 }
 
 func atomicWrite(path string, content []byte, mode os.FileMode) error {
