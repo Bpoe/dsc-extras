@@ -1,0 +1,64 @@
+name: dscapt
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/dscapt.yml"
+      - "resources/apt/**"
+  push:
+    paths:
+      - ".github/workflows/dscapt.yml"
+      - "resources/apt/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: resources/apt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: resources/apt/go.mod
+          cache-dependency-path: resources/apt/go.mod
+      - name: Verify formatting
+        run: test -z "$(gofmt -l ./cmd ./internal)"
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    defaults:
+      run:
+        working-directory: resources/apt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: resources/apt/go.mod
+          cache-dependency-path: resources/apt/go.mod
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p "dist/linux-${GOARCH}"
+          go build -o "dist/linux-${GOARCH}/dscapt" ./cmd/dscapt
+          cp dscapt.dsc.resource.json "dist/linux-${GOARCH}/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dscapt-linux-${{ matrix.goarch }}
+          path: resources/apt/dist/linux-${{ matrix.goarch }}/
+          if-no-files-found: error
