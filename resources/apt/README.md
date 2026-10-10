@@ -13,11 +13,11 @@ then points the Deb822 `Signed-By` field at that file. `Get` returns the actual
 key as ASCII armor, and `Test` compares parsed public-key material rather than
 armor formatting. No key downloads or user-specified key paths are supported.
 
-Each repository exclusively owns its `.sources` and `.gpg` files. Other
-repositories must not reference a keyring owned by this resource. On
-`ensure: Absent`, both managed files are removed without inspecting unrelated
-APT sources. Deb822 sources with external binary keyrings target APT 1.4 or
-newer as the conservative supported baseline.
+Each repository owns its `.sources` and `.gpg` files. Before `ensure: Absent`
+removes them, the resource checks `/etc/apt/sources.list` and
+`/etc/apt/sources.list.d` and refuses removal if another source references the
+managed keyring. Deb822 sources with external binary keyrings target APT 1.4
+or newer as the conservative supported baseline.
 
 ## Build and check
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -139,4 +140,75 @@ func serializeDeb822(repository Repository, keyPath string) []byte {
 	}
 	fmt.Fprintf(&source, "Signed-By: %s\n", keyPath)
 	return []byte(source.String())
+}
+
+func sourceReferencesKeyring(data []byte, extension, keyPath string) bool {
+	if extension == ".list" {
+		return oneLineSourceReferencesKeyring(data, keyPath)
+	}
+	signedBy := false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			signedBy = false
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if line[0] == ' ' || line[0] == '\t' {
+			if signedBy && keyringPathInValue(trimmed, keyPath) {
+				return true
+			}
+			continue
+		}
+		name, value, ok := strings.Cut(line, ":")
+		signedBy = ok && strings.EqualFold(name, "Signed-By")
+		if signedBy && keyringPathInValue(value, keyPath) {
+			return true
+		}
+	}
+	return false
+}
+
+func oneLineSourceReferencesKeyring(data []byte, keyPath string) bool {
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		start := strings.IndexByte(line, '[')
+		if start < 0 {
+			continue
+		}
+		end := strings.IndexByte(line[start+1:], ']')
+		if end < 0 {
+			continue
+		}
+		options := strings.Fields(line[start+1 : start+1+end])
+		for i := 0; i < len(options); i++ {
+			name, value, ok := strings.Cut(options[i], "=")
+			if !ok || !strings.EqualFold(name, "signed-by") {
+				continue
+			}
+			values := []string{value}
+			for j := i + 1; j < len(options) && !strings.Contains(options[j], "="); j++ {
+				values = append(values, options[j])
+			}
+			if keyringPathInValue(strings.Join(values, " "), keyPath) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func keyringPathInValue(value, keyPath string) bool {
+	for _, path := range strings.Fields(strings.ReplaceAll(value, ",", " ")) {
+		if filepath.Clean(path) == filepath.Clean(keyPath) {
+			return true
+		}
+	}
+	return false
 }

@@ -386,6 +386,68 @@ func TestAbsentOwnsAndRemovesExactlyItsFiles(t *testing.T) {
 	}
 }
 
+func TestAbsentPreservesKeyringReferencedByAnotherSource(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		extension string
+		content   func(string) string
+		topLevel  bool
+	}{
+		{
+			name:      "Deb822 whitespace-separated paths",
+			extension: ".sources",
+			content: func(keyPath string) string {
+				return "Types: deb\nURIs: https://other.example.org/debian\nSuites: stable\nComponents: main\nSigned-By: /other.gpg " + keyPath + "\n"
+			},
+		},
+		{
+			name:      "Deb822 comma-separated paths",
+			extension: ".sources",
+			content: func(keyPath string) string {
+				return "Types: deb\nURIs: https://other.example.org/debian\nSuites: stable\nComponents: main\nSigned-By: /other.gpg," + keyPath + "\n"
+			},
+		},
+		{
+			name:      "one-line comma-separated paths",
+			extension: ".list",
+			content: func(keyPath string) string {
+				return "deb [signed-by=/other.gpg," + keyPath + "] https://other.example.org/debian stable main\n"
+			},
+		},
+		{
+			name:      "top-level sources.list",
+			extension: ".list",
+			topLevel:  true,
+			content: func(keyPath string) string {
+				return "deb [signed-by=/other.gpg " + keyPath + "] https://other.example.org/debian stable main\n"
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newTestStore(t)
+			desired := validDesired()
+			if _, err := store.Set(desired); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(store.SourcesDir, "other"+test.extension)
+			if test.topLevel {
+				path = filepath.Join(filepath.Dir(store.SourcesDir), "sources.list")
+			}
+			writeFile(t, path, test.content(store.keyringPath(desired.Name)))
+
+			_, err := store.Set(Repository{Name: desired.Name, Ensure: "Absent"})
+			if err == nil {
+				t.Fatal("Set removed a keyring referenced by another source")
+			}
+			for _, managedPath := range []string{store.sourcePath(desired.Name), store.keyringPath(desired.Name)} {
+				if _, err := os.Stat(managedPath); err != nil {
+					t.Fatalf("managed path %q was removed despite the external reference: %v", managedPath, err)
+				}
+			}
+		})
+	}
+}
+
 func TestSetRepairsManagedSymlinksWithoutFollowingThem(t *testing.T) {
 	store := newTestStore(t)
 	desired := validDesired()

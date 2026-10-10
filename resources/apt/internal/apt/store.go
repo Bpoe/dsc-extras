@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -77,6 +78,13 @@ func (s Store) Set(desired Repository) (Repository, error) {
 		return Repository{}, err
 	}
 	if desired.Ensure == "Absent" {
+		referenced, err := s.keyringReferencedElsewhere(desired.Name)
+		if err != nil {
+			return Repository{}, err
+		}
+		if referenced {
+			return Repository{}, errors.New("repository keyring is referenced by another APT source")
+		}
 		if err := removeManagedFile(s.sourcePath(desired.Name)); err != nil {
 			return Repository{}, fmt.Errorf("remove repository source: %w", err)
 		}
@@ -208,6 +216,56 @@ func (s Store) keyringExists(name string) (bool, error) {
 		return false, fmt.Errorf("inspect repository keyring: %w", err)
 	}
 	return true, nil
+}
+
+func (s Store) keyringReferencedElsewhere(name string) (bool, error) {
+	keyPath := s.keyringPath(name)
+	if referenced, err := s.keyringReferencedInFile(filepath.Join(filepath.Dir(s.SourcesDir), "sources.list"), ".list", keyPath); err != nil || referenced {
+		return referenced, err
+	}
+	entries, err := os.ReadDir(s.SourcesDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect APT source directory: %w", err)
+	}
+	for _, entry := range entries {
+		extension := strings.ToLower(filepath.Ext(entry.Name()))
+		if extension != ".sources" && extension != ".list" {
+			continue
+		}
+		path := filepath.Join(s.SourcesDir, entry.Name())
+		if path == s.sourcePath(name) {
+			continue
+		}
+		referenced, err := s.keyringReferencedInFile(path, extension, keyPath)
+		if err != nil {
+			return false, err
+		}
+		if referenced {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s Store) keyringReferencedInFile(path, extension, keyPath string) (bool, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect APT source %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read APT source %q: %w", path, err)
+	}
+	return sourceReferencesKeyring(data, extension, keyPath), nil
 }
 
 func sourcePropertiesEqual(desired, actual Repository) bool {
