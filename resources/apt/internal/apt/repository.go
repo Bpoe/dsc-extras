@@ -62,7 +62,14 @@ func validateProperties(repository Repository) error {
 	if !suitePattern.MatchString(repository.Suite) {
 		return errors.New("suite must be a non-empty APT suite token")
 	}
-	if len(repository.Components) == 0 || !uniqueStrings(repository.Components) {
+	exactPath := strings.HasSuffix(repository.Suite, "/")
+	if exactPath && len(repository.Components) != 0 {
+		return errors.New("components must be omitted for an exact-path suite")
+	}
+	if !exactPath && len(repository.Components) == 0 {
+		return errors.New("components are required unless suite is an exact path")
+	}
+	if !uniqueStrings(repository.Components) {
 		return errors.New("components must contain unique APT component tokens")
 	}
 	for _, component := range repository.Components {

@@ -73,3 +73,22 @@ func TestValidateDesiredAndName(t *testing.T) {
 		t.Fatalf("Absent with only name failed validation: %v", err)
 	}
 }
+
+func TestExactPathSuiteRequiresNoComponents(t *testing.T) {
+	desired := validDesired()
+	desired.Suite = "./"
+	desired.Components = nil
+	if err := ValidateDesired(&desired); err != nil {
+		t.Fatalf("exact-path suite without components rejected: %v", err)
+	}
+	withComponents := validDesired()
+	withComponents.Suite = "./"
+	if err := ValidateDesired(&withComponents); err == nil {
+		t.Fatal("exact-path suite with components was accepted")
+	}
+	withoutComponents := validDesired()
+	withoutComponents.Components = nil
+	if err := ValidateDesired(&withoutComponents); err == nil {
+		t.Fatal("distribution suite without components was accepted")
+	}
+}

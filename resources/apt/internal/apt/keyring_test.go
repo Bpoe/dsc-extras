@@ -95,6 +95,40 @@ func TestSigningKeyBinaryPreservesMultipleKeys(t *testing.T) {
 	}
 }
 
+func TestSigningKeySerializationIsStableWithMultipleIdentities(t *testing.T) {
+	entity, err := openpgp.NewEntity("primary identity", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := entity.AddUserId("secondary identity", "", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	var armored bytes.Buffer
+	block, err := armor.Encode(&armored, openpgp.PublicKeyType, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := entity.Serialize(block); err != nil {
+		t.Fatal(err)
+	}
+	if err := block.Close(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := signingKeyBinary(armored.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 20; attempt++ {
+		next, err := signingKeyBinary(armored.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(first, next) {
+			t.Fatalf("canonical keyring changed on attempt %d", attempt)
+		}
+	}
+}
+
 func TestCanonicalBinaryKeyringRejectsInvalidAndPrivateMaterial(t *testing.T) {
 	for _, data := range [][]byte{[]byte("corrupt"), []byte(publicTestKey)} {
 		if _, err := canonicalPublicKeyring(data); err == nil {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -68,7 +69,7 @@ func signingKeyBinary(value string) ([]byte, error) {
 				return nil, errors.New("private OpenPGP subkey")
 			}
 		}
-		if err := entity.Serialize(&canonical); err != nil {
+		if err := serializeEntity(&canonical, entity); err != nil {
 			return nil, fmt.Errorf("serialize OpenPGP public key: %w", err)
 		}
 	}
@@ -115,11 +116,43 @@ func canonicalPublicKeyring(data []byte) ([]byte, error) {
 				return nil, errors.New("private OpenPGP subkey")
 			}
 		}
-		if err := entity.Serialize(&canonical); err != nil {
+		if err := serializeEntity(&canonical, entity); err != nil {
 			return nil, fmt.Errorf("serialize OpenPGP public key: %w", err)
 		}
 	}
 	return canonical.Bytes(), nil
+}
+
+func serializeEntity(destination io.Writer, entity *openpgp.Entity) error {
+	if err := entity.PrimaryKey.Serialize(destination); err != nil {
+		return err
+	}
+	for _, revocation := range entity.Revocations {
+		if err := revocation.Packet.Serialize(destination); err != nil {
+			return err
+		}
+	}
+	for _, signature := range entity.DirectSignatures {
+		if err := signature.Packet.Serialize(destination); err != nil {
+			return err
+		}
+	}
+	identityNames := make([]string, 0, len(entity.Identities))
+	for name := range entity.Identities {
+		identityNames = append(identityNames, name)
+	}
+	sort.Strings(identityNames)
+	for _, name := range identityNames {
+		if err := entity.Identities[name].Serialize(destination); err != nil {
+			return err
+		}
+	}
+	for _, subkey := range entity.Subkeys {
+		if err := subkey.Serialize(destination, false); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateArmorChecksum(value string, payload []byte) error {

@@ -33,7 +33,8 @@
           "title": "Repository name",
           "description": "Safe filename identifier for this repository's .sources and .gpg keyring files.",
           "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "x-dsc-key": true
         },
         "ensure": {
           "title": "Ensure repository",
@@ -88,6 +89,23 @@
           "readOnly": true
         }
       },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "suite": {
+                "pattern": "/$"
+              }
+            },
+            "required": ["suite"]
+          },
+          "then": {
+            "not": {
+              "required": ["components"]
+            }
+          }
+        }
+      ],
       "additionalProperties": false
     }
   }

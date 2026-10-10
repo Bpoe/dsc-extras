@@ -37,8 +37,10 @@ func parseDeb822(name, expectedKeyPath string, data []byte) (Repository, bool, b
 	components := values("components")
 	architectures := values("architectures")
 	keyringMatches := len(values("signed-by")) == 1 && fields["signed-by"] == expectedKeyPath
+	exactPath := len(suites) == 1 && strings.HasSuffix(suites[0], "/")
 	if len(types) != 1 || types[0] != "deb" ||
-		len(uris) != 1 || len(suites) != 1 || len(components) == 0 ||
+		len(uris) != 1 || len(suites) != 1 ||
+		(exactPath && len(components) != 0) || (!exactPath && len(components) == 0) ||
 		!keyringMatches {
 		syntaxOK = false
 	}
@@ -127,8 +129,11 @@ func parseDeb822Stanzas(data []byte) ([]map[string]string, bool) {
 
 func serializeDeb822(repository Repository, keyPath string) []byte {
 	var source strings.Builder
-	fmt.Fprintf(&source, "Types: deb\nURIs: %s\nSuites: %s\nComponents: %s\n",
-		repository.URI, repository.Suite, strings.Join(repository.Components, " "))
+	fmt.Fprintf(&source, "Types: deb\nURIs: %s\nSuites: %s\n",
+		repository.URI, repository.Suite)
+	if len(repository.Components) != 0 {
+		fmt.Fprintf(&source, "Components: %s\n", strings.Join(repository.Components, " "))
+	}
 	if len(repository.Architectures) != 0 {
 		fmt.Fprintf(&source, "Architectures: %s\n", strings.Join(repository.Architectures, " "))
 	}

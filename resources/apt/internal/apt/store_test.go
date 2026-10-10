@@ -107,8 +107,14 @@ func TestSetIsIdempotentAndReplacesAtomically(t *testing.T) {
 	if !strings.Contains(string(updated), "Components: main\n") || strings.Contains(string(updated), "Components: main contrib") {
 		t.Fatalf("property change was not reconciled: %s", updated)
 	}
-	if strings.Contains(string(updated), ".dscapt-") {
-		t.Fatalf("temporary file left beside source: %s", updated)
+	entries, err := os.ReadDir(store.SourcesDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".dscapt-") && strings.HasSuffix(entry.Name(), ".tmp") {
+			t.Fatalf("temporary file left in source directory: %s", entry.Name())
+		}
 	}
 }
 
@@ -200,7 +206,7 @@ func TestTestReportsRepairableDriftAndSetRepairs(t *testing.T) {
 		{
 			name: "wrong signing key path",
 			source: func(Store) string {
-				return "Types: deb\nURIs: https://packages.example.org/debian\nSuites: stable\nComponents: main contrib\nSigned-By: /tmp/unmanaged.asc\n"
+				return "Types: deb\nURIs: https://packages.example.org/debian\nSuites: stable\nComponents: main contrib\nSigned-By: /tmp/unmanaged.gpg\n"
 			},
 			keyring: func(Store) string { return publicTestKey },
 		},
@@ -285,6 +291,27 @@ func TestDeb822WhitespaceCommentsAndMultilineValues(t *testing.T) {
 	actual, compliant, err := store.Test(desired)
 	if err != nil || !compliant {
 		t.Fatalf("Test formatted/multiline source = (%#v, %t, %v), want compliant", actual, compliant, err)
+	}
+}
+
+func TestExactPathSuiteOmitsComponentsAndRoundTrips(t *testing.T) {
+	store := newTestStore(t)
+	desired := validDesired()
+	desired.Suite = "./"
+	desired.Components = nil
+	if _, err := store.Set(desired); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(store.sourcePath(desired.Name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "Components:") {
+		t.Fatalf("exact-path source unexpectedly includes components: %s", data)
+	}
+	actual, compliant, err := store.Test(desired)
+	if err != nil || !compliant {
+		t.Fatalf("Test exact-path repository=(%#v,%t,%v), want compliant", actual, compliant, err)
 	}
 }
 
