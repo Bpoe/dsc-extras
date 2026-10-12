@@ -1,0 +1,112 @@
+{
+  "$schema": "https://aka.ms/dsc/schemas/v3.1/bundled/resource/manifest.json",
+  "type": "DscExtras.Apt/Repository",
+  "version": "0.1.0",
+  "description": "Manage an APT repository using a Deb822 source file and external keyring",
+  "kind": "resource",
+  "get": {
+    "executable": "dscapt",
+    "args": ["get"],
+    "input": "stdin"
+  },
+  "set": {
+    "executable": "dscapt",
+    "args": ["set"],
+    "input": "stdin",
+    "implementsPretest": true,
+    "return": "state"
+  },
+  "test": {
+    "executable": "dscapt",
+    "args": ["test"],
+    "input": "stdin",
+    "return": "state"
+  },
+  "schema": {
+    "embedded": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "APT Repository",
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "title": "Repository name",
+          "description": "Safe filename identifier for this repository's .sources and .gpg keyring files.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+          "x-dsc-key": true
+        },
+        "ensure": {
+          "title": "Ensure repository",
+          "description": "Whether the repository source file should exist.",
+          "type": "string",
+          "enum": ["Present", "Absent"],
+          "default": "Present"
+        },
+        "uri": {
+          "title": "Repository URI",
+          "description": "Absolute HTTP, HTTPS, or local file URI for the APT repository.",
+          "type": "string",
+          "format": "uri"
+        },
+        "suite": {
+          "title": "Repository suite",
+          "description": "APT distribution suite, such as trixie or stable.",
+          "type": "string",
+          "pattern": "^(\\./|[A-Za-z0-9][A-Za-z0-9._+/-]*)$"
+        },
+        "components": {
+          "title": "Repository components",
+          "description": "APT components provided by the repository.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$"
+          }
+        },
+        "architectures": {
+          "title": "Repository architectures",
+          "description": "Optional architecture restrictions for this repository.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$"
+          }
+        },
+        "signingKey": {
+          "title": "Repository signing key",
+          "description": "Complete inline ASCII-armored OpenPGP public key written as a binary external .gpg keyring file.",
+          "type": "string",
+          "minLength": 1
+        },
+        "_inDesiredState": {
+          "title": "Instance is in the desired state",
+          "description": "Read-only result of the resource's Test operation.",
+          "type": ["boolean", "null"],
+          "readOnly": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "suite": {
+                "pattern": "/$"
+              }
+            },
+            "required": ["suite"]
+          },
+          "then": {
+            "not": {
+              "required": ["components"]
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}
