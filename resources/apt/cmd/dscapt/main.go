@@ -23,7 +23,7 @@ type testResult struct {
 }
 
 func main() {
-	store := apt.NewStore("", "")
+	store := apt.NewStore("")
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, store))
 }
 
@@ -53,7 +53,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, store apt.Sto
 
 	switch args[0] {
 	case "get":
-		actual, err := store.Get(instance.Name)
+		actual, err := store.Get(instance)
 		if err != nil {
 			return reportError(stderr, err.Error())
 		}

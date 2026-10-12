@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -13,6 +16,107 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	openpgp "github.com/ProtonMail/go-crypto/openpgp/v2"
 )
+
+type KeyringFormat string
+
+const (
+	ArmoredKeyring KeyringFormat = "ascii-armored"
+	BinaryKeyring  KeyringFormat = "binary-openpgp"
+)
+
+type AptKeyring struct {
+	Reference        string
+	Path             string
+	Format           KeyringFormat
+	OriginalContents []byte
+	Material         []byte
+	originalMaterial []byte
+	info             os.FileInfo
+	store            Store
+	create           bool
+	allowChange      bool
+}
+
+func (s Store) ReadKeyring(reference string) (*AptKeyring, error) {
+	path, err := s.resolve(reference)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect signing key %q: %w", reference, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("signing key %q is not a regular file", reference)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read signing key %q: %w", reference, err)
+	}
+	key := &AptKeyring{Reference: reference, Path: path, OriginalContents: data, info: info, store: s}
+	switch filepath.Ext(reference) {
+	case ".asc":
+		key.Format = ArmoredKeyring
+		key.Material, err = signingKeyBinary(string(data))
+	case ".gpg":
+		key.Format = BinaryKeyring
+		key.Material, err = canonicalPublicKeyring(data)
+	default:
+		err = errors.New("APT keyrings must use .asc for ASCII armor or .gpg for binary OpenPGP")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read signing key %q: %w", reference, err)
+	}
+	key.originalMaterial = slices.Clone(key.Material)
+	return key, nil
+}
+
+func (k *AptKeyring) changed() bool {
+	return k.create || !bytes.Equal(k.Material, k.originalMaterial)
+}
+
+func (k *AptKeyring) preflight() error {
+	if !k.changed() {
+		return nil
+	}
+	if !k.create && !k.allowChange {
+		return fmt.Errorf("refusing to overwrite signing key %q without exclusive DSC ownership", k.Reference)
+	}
+	return k.store.checkWrite(k.Path, k.OriginalContents, k.info, k.create)
+}
+
+func (k *AptKeyring) WriteToDisk() error {
+	if !k.changed() {
+		return nil
+	}
+	if err := k.preflight(); err != nil {
+		return err
+	}
+	data, err := canonicalPublicKeyring(k.Material)
+	if err != nil {
+		return err
+	}
+	if k.Format == ArmoredKeyring {
+		armored, err := armoredKeyring(data)
+		if err != nil {
+			return err
+		}
+		data = []byte(armored)
+	}
+	mode := os.FileMode(0644)
+	if k.info != nil {
+		mode = k.info.Mode().Perm()
+	}
+	if err := atomicWrite(k.Path, data, mode); err != nil {
+		return fmt.Errorf("write signing key %q: %w", k.Reference, err)
+	}
+	reloaded, err := k.store.ReadKeyring(k.Reference)
+	if err != nil {
+		return err
+	}
+	*k = *reloaded
+	return nil
+}
 
 func ValidateSigningKey(value string) (string, error) {
 	keyring, err := signingKeyBinary(value)
@@ -49,31 +153,7 @@ func signingKeyBinary(value string) ([]byte, error) {
 	if err := validateArmorChecksum(value, remaining); err != nil {
 		return nil, err
 	}
-	entities, err := openpgp.ReadKeyRing(bytes.NewReader(remaining))
-	if err != nil {
-		return nil, fmt.Errorf("parse OpenPGP keyring: %w", err)
-	}
-	if len(entities) == 0 {
-		return nil, errors.New("empty OpenPGP keyring")
-	}
-	var canonical bytes.Buffer
-	for _, entity := range entities {
-		if entity.PrimaryKey == nil || entity.PrivateKey != nil {
-			return nil, errors.New("not a public-only OpenPGP key")
-		}
-		if _, err := entity.VerifyPrimaryKey(time.Now(), nil); err != nil {
-			return nil, fmt.Errorf("verify OpenPGP primary key: %w", err)
-		}
-		for _, subkey := range entity.Subkeys {
-			if subkey.PrivateKey != nil {
-				return nil, errors.New("private OpenPGP subkey")
-			}
-		}
-		if err := serializeEntity(&canonical, entity); err != nil {
-			return nil, fmt.Errorf("serialize OpenPGP public key: %w", err)
-		}
-	}
-	return canonical.Bytes(), nil
+	return canonicalPublicKeyring(remaining)
 }
 
 func armoredKeyring(keyring []byte) (string, error) {
@@ -103,7 +183,7 @@ func canonicalPublicKeyring(data []byte) ([]byte, error) {
 	if len(entities) == 0 {
 		return nil, errors.New("empty binary OpenPGP keyring")
 	}
-	var canonical bytes.Buffer
+	var keys [][]byte
 	for _, entity := range entities {
 		if entity.PrimaryKey == nil || entity.PrivateKey != nil {
 			return nil, errors.New("not a public-only OpenPGP keyring")
@@ -116,11 +196,59 @@ func canonicalPublicKeyring(data []byte) ([]byte, error) {
 				return nil, errors.New("private OpenPGP subkey")
 			}
 		}
-		if err := serializeEntity(&canonical, entity); err != nil {
+		var key bytes.Buffer
+		if err := serializeEntity(&key, entity); err != nil {
 			return nil, fmt.Errorf("serialize OpenPGP public key: %w", err)
 		}
+		keys = append(keys, key.Bytes())
 	}
-	return canonical.Bytes(), nil
+	slices.SortFunc(keys, bytes.Compare)
+	keys = slices.CompactFunc(keys, bytes.Equal)
+	return bytes.Join(keys, nil), nil
+}
+
+func (s Store) signingMaterial(signing SigningConfiguration) ([]byte, error) {
+	if signing.InlineKey != "" {
+		return signingKeyBinary(signing.InlineKey)
+	}
+	if len(signing.Keyrings) == 0 {
+		if len(signing.Fingerprints) != 0 {
+			return nil, errors.New("Signed-By selects keys from global trust; configure an explicit keyring before managing this repository")
+		}
+		// Global APT trust is deliberately not equivalent to an explicit key.
+		return nil, nil
+	}
+	var material []byte
+	for _, reference := range signing.Keyrings {
+		key, err := s.ReadKeyring(reference)
+		if err != nil {
+			return nil, err
+		}
+		material = append(material, key.Material...)
+	}
+	if len(signing.Fingerprints) != 0 {
+		entities, err := openpgp.ReadKeyRing(bytes.NewReader(material))
+		if err != nil {
+			return nil, err
+		}
+		var selected bytes.Buffer
+		for _, fingerprint := range signing.Fingerprints {
+			found := false
+			for _, entity := range entities {
+				if strings.EqualFold(fingerprint, fmt.Sprintf("%X", entity.PrimaryKey.Fingerprint)) {
+					if err := serializeEntity(&selected, entity); err != nil {
+						return nil, err
+					}
+					found = true
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("Signed-By selector %q is missing or restricts subkeys; provision an explicit keyring with the intended trust before managing this repository", fingerprint)
+			}
+		}
+		material = selected.Bytes()
+	}
+	return canonicalPublicKeyring(material)
 }
 
 func serializeEntity(destination io.Writer, entity *openpgp.Entity) error {

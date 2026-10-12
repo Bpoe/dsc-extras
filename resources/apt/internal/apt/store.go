@@ -6,327 +6,427 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
-const (
-	defaultSourcesDir  = "/etc/apt/sources.list.d"
-	defaultKeyringsDir = "/etc/apt/keyrings"
-)
-
+// Root is "/" on the target machine and a temporary filesystem root in tests.
 type Store struct {
-	SourcesDir  string
-	KeyringsDir string
+	Root string
 }
 
-type observedState struct {
-	repository         Repository
-	sourceExists       bool
-	sourceCanonical    bool
-	keyringPathMatches bool
-	keyringValid       bool
-	keyringContents    []byte
-}
-
-func NewStore(sourcesDir, keyringsDir string) Store {
-	if sourcesDir == "" {
-		sourcesDir = defaultSourcesDir
+func NewStore(root string) Store {
+	if root == "" {
+		root = string(filepath.Separator)
 	}
-	if keyringsDir == "" {
-		keyringsDir = defaultKeyringsDir
-	}
-	return Store{SourcesDir: sourcesDir, KeyringsDir: keyringsDir}
+	return Store{Root: filepath.Clean(root)}
 }
 
-func (s Store) Get(name string) (Repository, error) {
-	if err := ValidateName(name); err != nil {
+func (s Store) resolve(reference string) (string, error) {
+	if !strings.HasPrefix(reference, "/") || strings.Contains(reference, "\\") ||
+		strings.Contains(reference, ":") || slices.Contains(strings.Split(reference, "/"), "..") {
+		return "", fmt.Errorf("unsafe absolute APT path %q", reference)
+	}
+	return filepath.Join(s.Root, filepath.FromSlash(strings.TrimPrefix(reference, "/"))), nil
+}
+
+func (s Store) sourcePath(name string) string {
+	return filepath.Join(s.Root, "etc", "apt", "sources.list.d", name+".sources")
+}
+
+func (s Store) keyringReference(name string) string {
+	return "/etc/apt/keyrings/" + name + ".gpg"
+}
+
+func (s Store) keyringPath(name string) string {
+	return filepath.Join(s.Root, "etc", "apt", "keyrings", name+".gpg")
+}
+
+func (s Store) readDocument(path string) (*AptDocument, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("APT source %q is not a regular file", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read APT source %q: %w", path, err)
+	}
+	d, err := parseDocument(path, data)
+	if err != nil {
+		return nil, err
+	}
+	d.info, d.store = info, s
+	return d, nil
+}
+
+func (s Store) Discover() ([]*AptDocument, error) {
+	paths := []string{}
+	main := filepath.Join(s.Root, "etc", "apt", "sources.list")
+	if _, err := os.Lstat(main); err == nil {
+		paths = append(paths, main)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect sources.list: %w", err)
+	}
+	dir := filepath.Join(s.Root, "etc", "apt", "sources.list.d")
+	info, err := os.Stat(dir)
+	if err == nil && !info.IsDir() {
+		return nil, fmt.Errorf("APT source directory %s is not a directory", dir)
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("discover APT sources: %w", err)
+	}
+	var files []os.DirEntry
+	if err == nil {
+		files, err = os.ReadDir(dir)
+		if err != nil {
+			return nil, fmt.Errorf("read APT source directory: %w", err)
+		}
+	}
+	for _, file := range files {
+		ext := filepath.Ext(file.Name())
+		if (ext == ".list" || ext == ".sources") && sourceNamePattern.MatchString(file.Name()) {
+			paths = append(paths, filepath.Join(dir, file.Name()))
+		}
+	}
+	var documents []*AptDocument
+	for _, path := range paths {
+		d, err := s.readDocument(path)
+		if err != nil {
+			return nil, err
+		}
+		documents = append(documents, d)
+	}
+	return documents, nil
+}
+
+type repositoryMatch struct {
+	document *AptDocument
+	index    int
+}
+
+func matches(documents []*AptDocument, selector Repository) []repositoryMatch {
+	var found []repositoryMatch
+	for _, document := range documents {
+		for index, entry := range document.Entries {
+			if entry.Type == "deb" && repositoryURI(entry.URI) == repositoryURI(selector.URI) && entry.Suite == selector.Suite {
+				found = append(found, repositoryMatch{document, index})
+			}
+		}
+	}
+	return found
+}
+
+func effectiveArchitectures(entry AptRepository) ([]string, error) {
+	result := slices.Clone(entry.Architectures)
+	for _, name := range []string{"architectures-add", "architectures-remove"} {
+		if entry.Options[name] != "" && len(entry.Architectures) == 0 {
+			return nil, errors.New("architecture modifiers depend on host APT defaults; configure explicit Architectures before managing this entry")
+		}
+	}
+	for _, arch := range strings.Fields(entry.Options["architectures-add"]) {
+		if !slices.Contains(result, arch) {
+			result = append(result, arch)
+		}
+	}
+	for _, arch := range strings.Fields(entry.Options["architectures-remove"]) {
+		result = slices.DeleteFunc(result, func(value string) bool { return value == arch })
+	}
+	if len(entry.Architectures) != 0 && len(result) == 0 {
+		return nil, errors.New("architecture modifiers remove every architecture; cannot represent this as host-default architectures")
+	}
+	return result, nil
+}
+
+func checkOptions(entry AptRepository) error {
+	for name, value := range entry.Options {
+		switch name {
+		case "architectures-add", "architectures-remove":
+			continue
+		case "allow-insecure", "allow-weak", "allow-downgrade-to-insecure":
+			if strings.EqualFold(value, "no") {
+				continue
+			}
+		case "check-valid-until", "check-date":
+			if strings.EqualFold(value, "yes") {
+				continue
+			}
+		default:
+			if strings.HasPrefix(name, "x-") {
+				continue
+			}
+		}
+		return fmt.Errorf("APT option %q=%q changes trust or unsupported behavior; resolve it explicitly before managing this entry", name, value)
+	}
+	return nil
+}
+
+func (s Store) observe(selector Repository, documents []*AptDocument) (Repository, []repositoryMatch, error) {
+	actual := Repository{Name: selector.Name, URI: selector.URI, Suite: selector.Suite, Ensure: "Absent"}
+	found := matches(documents, selector)
+	var firstMaterial []byte
+	for i, match := range found {
+		entry := match.document.Entries[match.index]
+		if err := checkOptions(entry); err != nil {
+			return actual, found, fmt.Errorf("%s: %w", match.document.Path, err)
+		}
+		architectures, err := effectiveArchitectures(entry)
+		if err != nil {
+			return actual, found, fmt.Errorf("%s: %w", match.document.Path, err)
+		}
+		material, err := s.signingMaterial(entry.Signing)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return actual, found, err
+		}
+		if i == 0 {
+			actual.Ensure, actual.URI, actual.Suite = "Present", entry.URI, entry.Suite
+			enabled := entry.Enabled
+			actual.Enabled = &enabled
+			actual.Architectures = architectures
+			firstMaterial = material
+			if len(material) > 0 {
+				actual.SigningKey, err = armoredKeyring(material)
+				if err != nil {
+					return actual, found, err
+				}
+			}
+		} else {
+			if !equalStrings(actual.Architectures, architectures) || actual.enabled() != entry.Enabled ||
+				!bytes.Equal(firstMaterial, material) || !sameSigningReferences(found[0].document.Entries[found[0].index].Signing, entry.Signing) ||
+				len(entry.Components) == 0 || intersects(actual.Components, entry.Components) {
+				return actual, found, fmt.Errorf("conflicting or duplicate definitions for %s %s in %s and %s; consolidate them explicitly",
+					selector.URI, selector.Suite, found[0].document.Path, match.document.Path)
+			}
+		}
+		actual.Components = append(actual.Components, entry.Components...)
+	}
+	// APT shares Release-file trust options between deb and deb-src entries.
+	for _, doc := range documents {
+		for _, entry := range doc.Entries {
+			if entry.Type == "deb-src" && len(found) > 0 && entry.Enabled &&
+				repositoryURI(entry.URI) == repositoryURI(selector.URI) && entry.Suite == selector.Suite {
+				first := found[0].document.Entries[found[0].index]
+				if !sameSigningReferences(first.Signing, entry.Signing) {
+					return actual, found, fmt.Errorf("conflicting deb-src signing configuration in %s; align Signed-By before managing this repository", doc.Path)
+				}
+			}
+		}
+	}
+	return actual, found, nil
+}
+
+func sameSigningReferences(a, b SigningConfiguration) bool {
+	return slices.Equal(a.Keyrings, b.Keyrings) && slices.Equal(a.Fingerprints, b.Fingerprints) &&
+		strings.TrimSpace(a.InlineKey) == strings.TrimSpace(b.InlineKey)
+}
+
+func intersects(a, b []string) bool {
+	for _, value := range a {
+		if slices.Contains(b, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s Store) Get(selector Repository) (Repository, error) {
+	if err := ValidateSelector(selector); err != nil {
 		return Repository{}, err
 	}
-	state, err := s.observe(name)
-	return state.repository, err
+	documents, err := s.Discover()
+	if err != nil {
+		return Repository{}, err
+	}
+	actual, _, err := s.observe(selector, documents)
+	return actual, err
 }
 
 func (s Store) Test(desired Repository) (Repository, bool, error) {
 	if err := ValidateDesired(&desired); err != nil {
 		return Repository{}, false, err
 	}
-	state, err := s.observe(desired.Name)
-	if err != nil {
-		return Repository{}, false, err
-	}
-	if desired.Ensure == "Present" {
-		desiredKey, err := signingKeyBinary(desired.SigningKey)
-		if err != nil {
-			return Repository{}, false, err
-		}
-		return state.repository, state.sourceCanonical && state.keyringPathMatches &&
-			state.keyringValid && sourcePropertiesEqual(desired, state.repository) &&
-			bytes.Equal(desiredKey, state.keyringContents), nil
-	}
-	if state.sourceExists {
-		return state.repository, false, nil
-	}
-	keyExists, err := s.keyringExists(desired.Name)
-	if err != nil {
-		return Repository{}, false, err
-	}
-	return state.repository, !keyExists, nil
+	actual, err := s.Get(desired)
+	return actual, err == nil && Equal(desired, actual), err
 }
 
 func (s Store) Set(desired Repository) (Repository, error) {
 	if err := ValidateDesired(&desired); err != nil {
 		return Repository{}, err
 	}
-	if desired.Ensure == "Absent" {
-		referenced, err := s.keyringReferencedElsewhere(desired.Name)
-		if err != nil {
-			return Repository{}, err
-		}
-		if referenced {
-			return Repository{}, errors.New("repository keyring is referenced by another APT source")
-		}
-		if err := removeManagedFile(s.sourcePath(desired.Name)); err != nil {
-			return Repository{}, fmt.Errorf("remove repository source: %w", err)
-		}
-		if err := removeManagedFile(s.keyringPath(desired.Name)); err != nil {
-			return Repository{}, fmt.Errorf("remove repository keyring: %w", err)
-		}
-		return Repository{Name: desired.Name, Ensure: "Absent"}, nil
-	}
-
-	desiredKey, err := signingKeyBinary(desired.SigningKey)
+	documents, err := s.Discover()
 	if err != nil {
 		return Repository{}, err
 	}
-	state, err := s.observe(desired.Name)
+	actual, found, err := s.observe(desired, documents)
 	if err != nil {
 		return Repository{}, err
 	}
-	if !state.keyringValid {
-		state.keyringContents, state.keyringValid, err = s.readKeyring(desired.Name)
+	if Equal(desired, actual) {
+		return actual, nil
+	}
+	if len(found) > 1 {
+		return Repository{}, errors.New("repository is spread across multiple entries; consolidate them explicitly before changing it")
+	}
+	var document *AptDocument
+	var key *AptKeyring
+	if len(found) == 0 {
+		material, err := signingKeyBinary(desired.SigningKey)
 		if err != nil {
 			return Repository{}, err
 		}
-	}
-	if state.sourceCanonical && state.keyringPathMatches && state.keyringValid &&
-		sourcePropertiesEqual(desired, state.repository) && bytes.Equal(desiredKey, state.keyringContents) {
-		return state.repository, nil
-	}
-	if !state.keyringValid || !bytes.Equal(state.keyringContents, desiredKey) {
-		if err := os.MkdirAll(s.KeyringsDir, 0755); err != nil {
-			return Repository{}, fmt.Errorf("create APT keyring directory: %w", err)
+		key, err = s.prepareKey(desired.Name, material, false, documents, nil)
+		if err != nil {
+			return Repository{}, err
 		}
-		if err := atomicWrite(s.keyringPath(desired.Name), desiredKey, 0644); err != nil {
-			return Repository{}, fmt.Errorf("write repository keyring: %w", err)
+		data := append([]byte(managedMarker(desired.Name)), serializeDeb822(desired, key.Reference)...)
+		document, err = parseDocument(s.sourcePath(desired.Name), data)
+		if err != nil {
+			return Repository{}, err
+		}
+		document.store, document.create = s, true
+		documents = append(documents, document)
+	} else {
+		match := found[0]
+		document = match.document
+		// A key-only change also alters this source's trust, even when its bytes
+		// remain unchanged. Require the source to be editable in that case too.
+		if err := s.checkWrite(document.Path, document.OriginalContents, document.info, false); err != nil {
+			return Repository{}, err
+		}
+		entry := &document.Entries[match.index]
+		if desired.Ensure == "Absent" {
+			entry.removed = true
+		} else {
+			if !equalStrings(actual.Architectures, desired.Architectures) {
+				if entry.Options["architectures-add"] != "" || entry.Options["architectures-remove"] != "" {
+					return Repository{}, errors.New("cannot change architecture restrictions with modifiers; simplify Architectures explicitly first")
+				}
+				entry.Architectures = slices.Clone(desired.Architectures)
+			}
+			if !equalStrings(actual.Components, desired.Components) {
+				entry.Components = slices.Clone(desired.Components)
+			}
+			entry.Enabled = desired.enabled()
+			material, err := signingKeyBinary(desired.SigningKey)
+			if err != nil {
+				return Repository{}, err
+			}
+			current, err := s.signingMaterial(entry.Signing)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return Repository{}, err
+			}
+			if !bytes.Equal(current, material) {
+				if entry.Signing.InlineKey != "" {
+					entry.Signing.InlineKey = desired.SigningKey
+				} else {
+					unrestricted := len(entry.Signing.Keyrings) == 0 && len(entry.Signing.Fingerprints) == 0
+					owned := bytes.HasPrefix(document.OriginalContents, []byte(managedMarker(desired.Name))) &&
+						equalStrings(entry.Signing.Keyrings, []string{s.keyringReference(desired.Name)}) &&
+						len(entry.Signing.Fingerprints) == 0
+					if !unrestricted && !owned {
+						return Repository{}, fmt.Errorf("signing key for %s is externally managed; provision the intended key explicitly rather than overwriting its trust material", document.Path)
+					}
+					key, err = s.prepareKey(desired.Name, material, owned, documents, &match)
+					if err != nil {
+						return Repository{}, err
+					}
+					entry.Signing = SigningConfiguration{Keyrings: []string{key.Reference}}
+				}
+			}
 		}
 	}
-	if !state.sourceCanonical || !state.keyringPathMatches || !sourcePropertiesEqual(desired, state.repository) {
-		if err := os.MkdirAll(s.SourcesDir, 0755); err != nil {
-			return Repository{}, fmt.Errorf("create APT source directory: %w", err)
-		}
-		if err := atomicWrite(s.sourcePath(desired.Name), serializeDeb822(desired, s.keyringPath(desired.Name)), 0644); err != nil {
-			return Repository{}, fmt.Errorf("write repository source: %w", err)
+	// Validate the entire plan, including shared Release-file options, before any writes.
+	if desired.Ensure != "Absent" {
+		if err := checkPlannedTrust(documents, desired); err != nil {
+			return Repository{}, err
 		}
 	}
-	state, err = s.observe(desired.Name)
+	if err := document.preflight(); err != nil {
+		return Repository{}, err
+	}
+	if key != nil {
+		if err := key.preflight(); err != nil {
+			return Repository{}, err
+		}
+		if err := key.WriteToDisk(); err != nil {
+			return Repository{}, err
+		}
+	}
+	if err := document.WriteToDisk(); err != nil {
+		return Repository{}, err
+	}
+	actual, compliant, err := s.Test(desired)
 	if err != nil {
 		return Repository{}, fmt.Errorf("read reconciled repository: %w", err)
 	}
-	if !state.sourceCanonical || !state.keyringPathMatches || !state.keyringValid ||
-		!sourcePropertiesEqual(desired, state.repository) || !bytes.Equal(desiredKey, state.keyringContents) {
-		return Repository{}, errors.New("repository did not converge to desired state")
+	if !compliant {
+		return Repository{}, errors.New("repository did not converge; inspect the current source definitions")
 	}
-	return state.repository, nil
+	return actual, nil
 }
 
-func (s Store) observe(name string) (observedState, error) {
-	path := s.sourcePath(name)
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return observedState{
-			repository:   Repository{Name: name, Ensure: "Absent"},
-			sourceExists: false,
-		}, nil
-	}
-	if err != nil {
-		return observedState{}, fmt.Errorf("inspect repository source: %w", err)
-	}
-	state := observedState{
-		repository:   Repository{Name: name, Ensure: "Present"},
-		sourceExists: true,
-	}
-	if !info.Mode().IsRegular() {
-		return state, nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return observedState{}, fmt.Errorf("read repository source: %w", err)
-	}
-	parsed, supported, keyringMatches := parseDeb822(name, s.keyringPath(name), data)
-	state.repository = parsed
-	state.sourceCanonical = supported && info.Mode().Perm() == 0644
-	state.keyringPathMatches = keyringMatches
-	if !keyringMatches {
-		return state, nil
-	}
-	key, valid, err := s.readKeyring(name)
-	if err != nil {
-		return observedState{}, err
-	}
-	if valid {
-		state.keyringValid = true
-		state.keyringContents = key
-		state.repository.SigningKey, err = armoredKeyring(key)
-		if err != nil {
-			return observedState{}, err
+func managedMarker(name string) string { return "# Managed by dscapt: " + name + "\n" }
+
+func checkPlannedTrust(documents []*AptDocument, desired Repository) error {
+	var first *AptRepository
+	for _, document := range documents {
+		for _, entry := range document.Entries {
+			if entry.removed || !entry.Enabled || repositoryURI(entry.URI) != repositoryURI(desired.URI) || entry.Suite != desired.Suite {
+				continue
+			}
+			if first != nil && !sameSigningReferences(first.Signing, entry.Signing) {
+				return fmt.Errorf("change would conflict with Signed-By in %s; align related deb/deb-src entries explicitly", document.Path)
+			}
+			copy := entry
+			first = &copy
 		}
 	}
-	return state, nil
+	return nil
 }
 
-func (s Store) readKeyring(name string) ([]byte, bool, error) {
-	keyPath := s.keyringPath(name)
-	keyInfo, err := os.Lstat(keyPath)
+func (s Store) prepareKey(name string, material []byte, owned bool, documents []*AptDocument, target *repositoryMatch) (*AptKeyring, error) {
+	reference := s.keyringReference(name)
+	key, err := s.ReadKeyring(reference)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
+		key = &AptKeyring{Reference: reference, Path: s.keyringPath(name), Format: BinaryKeyring, store: s, create: true}
+	} else if err != nil {
+		return nil, err
+	} else if bytes.Equal(key.Material, material) {
+		return key, nil
+	} else if !owned {
+		return nil, fmt.Errorf("keyring %s already exists with different material; choose a different name or reconcile its owner", reference)
 	}
-	if err != nil {
-		return nil, false, fmt.Errorf("inspect repository keyring: %w", err)
-	}
-	if !keyInfo.Mode().IsRegular() || keyInfo.Mode().Perm() != 0644 {
-		return nil, false, nil
-	}
-	keyData, err := os.ReadFile(keyPath)
-	if err != nil {
-		return nil, false, fmt.Errorf("read repository keyring: %w", err)
-	}
-	key, err := canonicalPublicKeyring(keyData)
-	if err != nil {
-		return nil, false, nil
-	}
-	return key, true, nil
-}
-
-func (s Store) keyringExists(name string) (bool, error) {
-	_, err := os.Lstat(s.keyringPath(name))
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("inspect repository keyring: %w", err)
-	}
-	return true, nil
-}
-
-func (s Store) keyringReferencedElsewhere(name string) (bool, error) {
-	keyPath := s.keyringPath(name)
-	if referenced, err := s.keyringReferencedInFile(filepath.Join(filepath.Dir(s.SourcesDir), "sources.list"), ".list", keyPath); err != nil || referenced {
-		return referenced, err
-	}
-	entries, err := os.ReadDir(s.SourcesDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("inspect APT source directory: %w", err)
-	}
-	for _, entry := range entries {
-		extension := strings.ToLower(filepath.Ext(entry.Name()))
-		if extension != ".sources" && extension != ".list" {
-			continue
-		}
-		path := filepath.Join(s.SourcesDir, entry.Name())
-		if path == s.sourcePath(name) {
-			continue
-		}
-		referenced, err := s.keyringReferencedInFile(path, extension, keyPath)
-		if err != nil {
-			return false, err
-		}
-		if referenced {
-			return true, nil
+	for _, document := range documents {
+		for index, entry := range document.Entries {
+			if target != nil && document == target.document && index == target.index {
+				continue
+			}
+			for _, other := range entry.Signing.Keyrings {
+				path, err := s.resolve(other)
+				if err != nil {
+					return nil, err
+				}
+				info, err := os.Stat(path)
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					return nil, err
+				}
+				if errors.Is(err, os.ErrNotExist) {
+					link, linkErr := os.Lstat(path)
+					if linkErr == nil && link.Mode()&os.ModeSymlink != 0 {
+						return nil, fmt.Errorf("cannot establish keyring sharing through unresolved symlink %s; repair it before changing trust", path)
+					}
+					if linkErr != nil && !errors.Is(linkErr, os.ErrNotExist) {
+						return nil, linkErr
+					}
+				}
+				if filepath.Clean(path) == filepath.Clean(key.Path) || key.info != nil && info != nil && os.SameFile(key.info, info) {
+					return nil, fmt.Errorf("keyring %s is shared with %s; provision separate trust material before changing it", reference, document.Path)
+				}
+			}
 		}
 	}
-	return false, nil
-}
-
-func (s Store) keyringReferencedInFile(path, extension, keyPath string) (bool, error) {
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("inspect APT source %q: %w", path, err)
-	}
-	if !info.Mode().IsRegular() {
-		return false, nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false, fmt.Errorf("read APT source %q: %w", path, err)
-	}
-	return sourceReferencesKeyring(data, extension, keyPath), nil
-}
-
-func sourcePropertiesEqual(desired, actual Repository) bool {
-	return desired.Name == actual.Name &&
-		desired.URI == actual.URI &&
-		desired.Suite == actual.Suite &&
-		equalStrings(desired.Components, actual.Components) &&
-		equalStrings(desired.Architectures, actual.Architectures)
-}
-
-func (s Store) sourcePath(name string) string {
-	return filepath.Join(s.SourcesDir, name+".sources")
-}
-
-func (s Store) keyringPath(name string) string {
-	return filepath.Join(s.KeyringsDir, name+".gpg")
-}
-
-func atomicWrite(path string, content []byte, mode os.FileMode) error {
-	file, err := os.CreateTemp(filepath.Dir(path), ".dscapt-*.tmp")
-	if err != nil {
-		return err
-	}
-	tempPath := file.Name()
-	defer os.Remove(tempPath)
-	if err := file.Chmod(mode); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if _, err := file.Write(content); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tempPath, path)
-}
-
-func removeIfExists(path string) error {
-	err := os.Remove(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return err
-}
-
-func removeManagedFile(path string) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
-		return fmt.Errorf("managed path %q is not a regular file", path)
-	}
-	return os.Remove(path)
+	key.Material, key.allowChange = material, owned
+	return key, nil
 }

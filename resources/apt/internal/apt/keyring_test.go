@@ -2,6 +2,7 @@ package apt
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -9,6 +10,63 @@ import (
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	openpgp "github.com/ProtonMail/go-crypto/openpgp/v2"
 )
+
+func TestMultipleKeyringsAndFingerprintTrustSelections(t *testing.T) {
+	store := newTestStore(t)
+	desired := validDesired()
+	first, err := signingKeyBinary(desired.SigningKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := signingKeyBinary(otherTestKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureFile(t, store, "/etc/apt/keyrings/first.asc", desired.SigningKey)
+	fixtureFile(t, store, "/etc/apt/keyrings/second.gpg", string(second))
+	combined := append(append([]byte(nil), second...), first...)
+	desired.SigningKey, err = armoredKeyring(combined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := fixtureFile(t, store, "/etc/apt/sources.list", "deb [arch=amd64 signed-by=/etc/apt/keyrings/first.asc,/etc/apt/keyrings/second.gpg] "+desired.URI+" stable main contrib\n")
+	assertCompliantNoOp(t, store, desired)
+
+	desired.SigningKey = publicTestKey
+	if _, compliant, err := store.Test(desired); err != nil || compliant {
+		t.Fatalf("extra trusted key was ignored: %t, %v", compliant, err)
+	}
+	entities, err := openpgp.ReadKeyRing(bytes.NewReader(first))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := fmt.Sprintf("%X", entities[0].PrimaryKey.Fingerprint)
+	writeFile(t, path, "deb [arch=amd64 signed-by=/etc/apt/keyrings/first.asc,/etc/apt/keyrings/second.gpg,"+fingerprint+"] "+desired.URI+" stable main contrib\n")
+	assertCompliantNoOp(t, store, desired)
+	writeFile(t, path, "deb [arch=amd64 signed-by=/etc/apt/keyrings/first.asc,"+fingerprint+"!] "+desired.URI+" stable main contrib\n")
+	before := snapshot(t, store.Root)
+	if _, err := store.Set(desired); err == nil {
+		t.Fatal("restricted fingerprint trust was silently broadened")
+	}
+	assertUnchanged(t, before, snapshot(t, store.Root))
+}
+
+func otherTestKey(t *testing.T) string {
+	t.Helper()
+	entity, err := openpgp.NewEntity("second synthetic test", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var binary bytes.Buffer
+	if err := entity.Serialize(&binary); err != nil {
+		t.Fatal(err)
+	}
+	armored, err := armoredKeyring(binary.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return armored
+}
 
 func TestValidateSigningKeyRejectsSecretKeyMaterial(t *testing.T) {
 	entity, err := openpgp.NewEntity("synthetic test", "", "", nil)

@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,7 +23,10 @@ TxkEAP0SyQl4tdiUJgP6HlHWZy4fJfHLAr6K34wAOxhaYXf8CQ==
 func makeStore(t *testing.T) apt.Store {
 	t.Helper()
 	root := t.TempDir()
-	return apt.NewStore(root+"/sources.list.d", root+"/keyrings")
+	if err := os.MkdirAll(filepath.Join(root, "var", "lib", "dpkg", "info"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return apt.NewStore(root)
 }
 
 func call(t *testing.T, store apt.Store, operation, input string) (int, string, string) {
@@ -31,9 +36,9 @@ func call(t *testing.T, store apt.Store, operation, input string) (int, string, 
 	return code, stdout.String(), stderr.String()
 }
 
-func TestGetAcceptsOnlyNameAndReturnsAbsentState(t *testing.T) {
+func TestGetAcceptsLogicalSelectorAndReturnsAbsentState(t *testing.T) {
 	store := makeStore(t)
-	code, stdout, stderr := call(t, store, "get", `{"name":"example"}`)
+	code, stdout, stderr := call(t, store, "get", `{"name":"example","uri":"https://packages.example.org/debian","suite":"stable"}`)
 	if code != 0 || stderr != "" {
 		t.Fatalf("Get returned (%d, %q), want success", code, stderr)
 	}
@@ -88,7 +93,7 @@ func TestSetGetAndTestUseDSCJSONContract(t *testing.T) {
 		}
 	}
 
-	code, stdout, stderr = call(t, store, "get", `{"name":"example"}`)
+	code, stdout, stderr = call(t, store, "get", `{"name":"example","uri":"https://packages.example.org/debian","suite":"stable"}`)
 	if code != 0 || stderr != "" {
 		t.Fatalf("Get returned (%d, %q)", code, stderr)
 	}
@@ -109,6 +114,7 @@ func TestCLIRejectsInvalidJSONAndUnknownOperation(t *testing.T) {
 		{name: "invalid JSON", operation: "get", input: "{"},
 		{name: "unknown operation", operation: "remove", input: `{"name":"example"}`},
 		{name: "unsafe name", operation: "get", input: `{"name":"../escape"}`},
+		{name: "filename-only selector", operation: "get", input: `{"name":"example"}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			code, stdout, stderr := call(t, makeStore(t), test.operation, test.input)

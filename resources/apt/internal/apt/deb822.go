@@ -1,214 +1,192 @@
 package apt
 
 import (
-	"bufio"
-	"bytes"
 	"fmt"
-	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
 var deb822FieldName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`)
 
-func parseDeb822(name, expectedKeyPath string, data []byte) (Repository, bool, bool) {
-	repository := Repository{Name: name, Ensure: "Present"}
-	stanzas, syntaxOK := parseDeb822Stanzas(data)
-	if len(stanzas) != 1 {
-		return repository, false, false
-	}
-	fields := stanzas[0]
-	if !syntaxOK {
-		populateRepository(&repository, fields)
-		return repository, false, false
-	}
-	for field := range fields {
-		switch field {
-		case "types", "uris", "suites", "components", "architectures", "signed-by":
-		default:
-			syntaxOK = false
-		}
-	}
-	values := func(key string) []string {
-		return strings.Fields(fields[key])
-	}
-	types := values("types")
-	uris := values("uris")
-	suites := values("suites")
-	components := values("components")
-	architectures := values("architectures")
-	keyringMatches := len(values("signed-by")) == 1 && fields["signed-by"] == expectedKeyPath
-	exactPath := len(suites) == 1 && strings.HasSuffix(suites[0], "/")
-	if len(types) != 1 || types[0] != "deb" ||
-		len(uris) != 1 || len(suites) != 1 ||
-		(exactPath && len(components) != 0) || (!exactPath && len(components) == 0) ||
-		!keyringMatches {
-		syntaxOK = false
-	}
-	populateRepository(&repository, fields)
-	if len(uris) == 1 {
-		repository.URI = uris[0]
-	}
-	if len(suites) == 1 {
-		repository.Suite = suites[0]
-	}
-	repository.Components = components
-	repository.Architectures = architectures
-	if validateProperties(repository) != nil {
-		syntaxOK = false
-	}
-	return repository, syntaxOK, keyringMatches
+type sourceField struct {
+	name       string
+	value      string
+	start, end int
 }
 
-func populateRepository(repository *Repository, fields map[string]string) {
-	if values := strings.Fields(fields["uris"]); len(values) == 1 {
-		repository.URI = values[0]
-	}
-	if values := strings.Fields(fields["suites"]); len(values) == 1 {
-		repository.Suite = values[0]
-	}
-	repository.Components = strings.Fields(fields["components"])
-	repository.Architectures = strings.Fields(fields["architectures"])
+type sourceBlock struct {
+	start, end      int
+	first, endEntry int
+	fields          []sourceField
 }
 
-func parseDeb822Stanzas(data []byte) ([]map[string]string, bool) {
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 4096), 4<<20)
-	var stanzas []map[string]string
-	fields := make(map[string]string)
-	field := ""
-	open := false
-	syntaxOK := true
-	for scanner.Scan() {
-		line := strings.TrimSuffix(scanner.Text(), "\r")
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			if open {
-				stanzas = append(stanzas, fields)
-				fields = make(map[string]string)
-				field = ""
-				open = false
-			}
+func (d *AptDocument) parseDeb822() error {
+	lines := documentLines(d.OriginalContents)
+	for i := 0; i < len(lines); {
+		if strings.TrimSpace(lines[i].text) == "" {
+			i++
 			continue
 		}
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if line[0] == ' ' || line[0] == '\t' {
-			if field == "" {
-				syntaxOK = false
+		block := sourceBlock{start: lines[i].start, first: len(d.Entries)}
+		values := map[string]string{}
+		for ; i < len(lines) && strings.TrimSpace(lines[i].text) != ""; i++ {
+			line := lines[i]
+			block.end = line.end
+			if strings.HasPrefix(strings.TrimSpace(line.text), "#") {
 				continue
 			}
-			fields[field] += " " + trimmed
+			if strings.HasPrefix(line.text, " ") || strings.HasPrefix(line.text, "\t") {
+				if len(block.fields) == 0 {
+					return fmt.Errorf("orphan continuation at line %d", i+1)
+				}
+				field := &block.fields[len(block.fields)-1]
+				field.value += "\n" + strings.TrimSpace(line.text)
+				field.end = line.end
+				values[field.name] = field.value
+				continue
+			}
+			name, value, ok := strings.Cut(line.text, ":")
+			if !ok || !deb822FieldName.MatchString(name) {
+				return fmt.Errorf("invalid Deb822 field at line %d", i+1)
+			}
+			name = strings.ToLower(name)
+			if _, exists := values[name]; exists {
+				return fmt.Errorf("duplicate Deb822 field %q at line %d", name, i+1)
+			}
+			value = strings.TrimSpace(value)
+			values[name] = value
+			block.fields = append(block.fields, sourceField{name, value, line.start, line.end})
+		}
+		if len(block.fields) == 0 {
 			continue
 		}
-		name, value, ok := strings.Cut(line, ":")
-		if !ok || !deb822FieldName.MatchString(name) {
-			syntaxOK = false
-			field = ""
-			continue
+		types, uris, suites := strings.Fields(values["types"]), strings.Fields(values["uris"]), strings.Fields(values["suites"])
+		if len(types) == 0 || len(uris) == 0 || len(suites) == 0 {
+			return fmt.Errorf("Deb822 stanza at byte %d requires Types, URIs and Suites", block.start)
 		}
-		field = strings.ToLower(name)
-		if _, duplicate := fields[field]; duplicate {
-			syntaxOK = false
-			continue
+		if len(types)*len(uris)*len(suites) > 4096 {
+			return fmt.Errorf("Deb822 stanza at byte %d expands to too many repositories", block.start)
 		}
-		fields[field] = strings.TrimSpace(value)
-		open = true
+		for _, typ := range types {
+			for _, uri := range uris {
+				for _, suite := range suites {
+					repo, err := repositoryFromFields(typ, uri, suite, values)
+					if err != nil {
+						return err
+					}
+					d.Entries = append(d.Entries, repo)
+				}
+			}
+		}
+		block.endEntry = len(d.Entries)
+		d.blocks = append(d.blocks, block)
 	}
-	if scanner.Err() != nil {
-		syntaxOK = false
+	return nil
+}
+
+func repositoryFromFields(typ, uri, suite string, fields map[string]string) (AptRepository, error) {
+	repo := AptRepository{
+		Type: typ, URI: uri, Suite: suite, Enabled: true,
+		Components: strings.Fields(fields["components"]), Architectures: strings.Fields(fields["architectures"]),
+		Options: map[string]string{},
 	}
-	if open {
-		stanzas = append(stanzas, fields)
+	if typ != "deb" && typ != "deb-src" {
+		return repo, fmt.Errorf("unsupported APT source type %q", typ)
 	}
-	if len(stanzas) == 0 {
-		return []map[string]string{{}}, false
+	if value, exists := fields["enabled"]; exists {
+		switch strings.ToLower(value) {
+		case "yes":
+		case "no":
+			repo.Enabled = false
+		default:
+			return repo, fmt.Errorf("invalid Enabled value %q", value)
+		}
 	}
-	return stanzas, syntaxOK
+	signedBy := strings.TrimSpace(fields["signed-by"])
+	if strings.HasPrefix(signedBy, "-----BEGIN PGP PUBLIC KEY BLOCK-----") {
+		repo.Signing.InlineKey = strings.ReplaceAll(signedBy, "\n.\n", "\n\n") + "\n"
+	} else {
+		for _, reference := range strings.Fields(strings.ReplaceAll(signedBy, ",", " ")) {
+			if strings.HasPrefix(reference, "/") {
+				repo.Signing.Keyrings = append(repo.Signing.Keyrings, reference)
+			} else if fingerprintPattern.MatchString(reference) {
+				repo.Signing.Fingerprints = append(repo.Signing.Fingerprints, strings.ToUpper(reference))
+			} else {
+				return repo, fmt.Errorf("invalid Signed-By reference %q", reference)
+			}
+		}
+	}
+	for name, value := range fields {
+		switch name {
+		case "types", "uris", "suites", "components", "architectures", "enabled", "signed-by":
+		default:
+			repo.Options[name] = value
+		}
+	}
+	if strings.HasSuffix(suite, "/") != (len(repo.Components) == 0) {
+		return repo, fmt.Errorf("invalid components for suite %q", suite)
+	}
+	return repo, nil
+}
+
+var fingerprintPattern = regexp.MustCompile(`(?i)^[0-9a-f]{40}!?$`)
+
+func signingValue(signing SigningConfiguration) string {
+	if signing.InlineKey != "" {
+		return "\n" + strings.ReplaceAll(strings.TrimSpace(signing.InlineKey), "\n\n", "\n.\n")
+	}
+	return strings.Join(append(slices.Clone(signing.Keyrings), signing.Fingerprints...), " ")
+}
+
+func repositoryFields(r AptRepository) map[string]string {
+	fields := map[string]string{
+		"types": r.Type, "uris": r.URI, "suites": r.Suite,
+		"components": strings.Join(r.Components, " "), "architectures": strings.Join(r.Architectures, " "),
+		"signed-by": signingValue(r.Signing),
+	}
+	if !r.Enabled {
+		fields["enabled"] = "no"
+	} else {
+		fields["enabled"] = "yes"
+	}
+	for name, value := range r.Options {
+		fields[name] = value
+	}
+	return fields
+}
+
+func deb822Field(name, value, newline string) string {
+	var lines strings.Builder
+	fmt.Fprintf(&lines, "%s: %s%s", name, strings.Split(value, "\n")[0], newline)
+	for _, continuation := range strings.Split(value, "\n")[1:] {
+		fmt.Fprintf(&lines, " %s%s", continuation, newline)
+	}
+	return lines.String()
 }
 
 func serializeDeb822(repository Repository, keyPath string) []byte {
-	var source strings.Builder
-	fmt.Fprintf(&source, "Types: deb\nURIs: %s\nSuites: %s\n",
-		repository.URI, repository.Suite)
-	if len(repository.Components) != 0 {
-		fmt.Fprintf(&source, "Components: %s\n", strings.Join(repository.Components, " "))
+	repo := AptRepository{Type: "deb", URI: repository.URI, Suite: repository.Suite,
+		Components: repository.Components, Architectures: repository.Architectures,
+		Enabled: repository.enabled(), Signing: SigningConfiguration{Keyrings: []string{keyPath}}}
+	fields := repositoryFields(repo)
+	var out strings.Builder
+	for _, name := range []string{"types", "uris", "suites", "components", "architectures", "enabled", "signed-by"} {
+		if fields[name] == "" || name == "enabled" && repo.Enabled {
+			continue
+		}
+		out.WriteString(deb822Field(fieldTitle(name), fields[name], "\n"))
 	}
-	if len(repository.Architectures) != 0 {
-		fmt.Fprintf(&source, "Architectures: %s\n", strings.Join(repository.Architectures, " "))
-	}
-	fmt.Fprintf(&source, "Signed-By: %s\n", keyPath)
-	return []byte(source.String())
+	return []byte(out.String())
 }
 
-func sourceReferencesKeyring(data []byte, extension, keyPath string) bool {
-	if extension == ".list" {
-		return oneLineSourceReferencesKeyring(data, keyPath)
+func fieldTitle(name string) string {
+	switch name {
+	case "uris":
+		return "URIs"
+	case "signed-by":
+		return "Signed-By"
+	default:
+		return strings.ToUpper(name[:1]) + name[1:]
 	}
-	signedBy := false
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSuffix(line, "\r")
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			signedBy = false
-			continue
-		}
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		if line[0] == ' ' || line[0] == '\t' {
-			if signedBy && keyringPathInValue(trimmed, keyPath) {
-				return true
-			}
-			continue
-		}
-		name, value, ok := strings.Cut(line, ":")
-		signedBy = ok && strings.EqualFold(name, "Signed-By")
-		if signedBy && keyringPathInValue(value, keyPath) {
-			return true
-		}
-	}
-	return false
-}
-
-func oneLineSourceReferencesKeyring(data []byte, keyPath string) bool {
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "#") {
-			continue
-		}
-		start := strings.IndexByte(line, '[')
-		if start < 0 {
-			continue
-		}
-		end := strings.IndexByte(line[start+1:], ']')
-		if end < 0 {
-			continue
-		}
-		options := strings.Fields(line[start+1 : start+1+end])
-		for i := 0; i < len(options); i++ {
-			name, value, ok := strings.Cut(options[i], "=")
-			if !ok || !strings.EqualFold(name, "signed-by") {
-				continue
-			}
-			values := []string{value}
-			for j := i + 1; j < len(options) && !strings.Contains(options[j], "="); j++ {
-				values = append(values, options[j])
-			}
-			if keyringPathInValue(strings.Join(values, " "), keyPath) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func keyringPathInValue(value, keyPath string) bool {
-	for _, path := range strings.Fields(strings.ReplaceAll(value, ",", " ")) {
-		if filepath.Clean(path) == filepath.Clean(keyPath) {
-			return true
-		}
-	}
-	return false
 }

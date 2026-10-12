@@ -2,7 +2,7 @@
   "$schema": "https://aka.ms/dsc/schemas/v3.1/bundled/resource/manifest.json",
   "type": "DscExtras.Apt/Repository",
   "version": "0.1.0",
-  "description": "Manage an APT repository using a Deb822 source file and external keyring",
+  "description": "Manage logical APT repository state while preserving existing source and keyring formats",
   "kind": "resource",
   "get": {
     "executable": "dscapt",
@@ -27,18 +27,18 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "APT Repository",
       "type": "object",
-      "required": ["name"],
+      "required": ["name", "uri", "suite"],
       "properties": {
         "name": {
           "title": "Repository name",
-          "description": "Safe filename identifier for this repository's .sources and .gpg keyring files.",
+          "description": "Management label and filename stem for new files only. Existing repositories are discovered by URI and suite.",
           "type": "string",
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
           "x-dsc-key": true
         },
         "ensure": {
           "title": "Ensure repository",
-          "description": "Whether the repository source file should exist.",
+          "description": "Whether the logical binary-package repository definition should exist. Removal retains keyrings and unrelated entries.",
           "type": "string",
           "enum": ["Present", "Absent"],
           "default": "Present"
@@ -47,13 +47,15 @@
           "title": "Repository URI",
           "description": "Absolute HTTP, HTTPS, or local file URI for the APT repository.",
           "type": "string",
-          "format": "uri"
+          "format": "uri",
+          "x-dsc-key": true
         },
         "suite": {
           "title": "Repository suite",
           "description": "APT distribution suite, such as trixie or stable.",
           "type": "string",
-          "pattern": "^(\\./|[A-Za-z0-9][A-Za-z0-9._+/-]*)$"
+          "pattern": "^(\\./|[A-Za-z0-9][A-Za-z0-9._+/-]*)$",
+          "x-dsc-key": true
         },
         "components": {
           "title": "Repository components",
@@ -68,7 +70,7 @@
         },
         "architectures": {
           "title": "Repository architectures",
-          "description": "Optional architecture restrictions for this repository.",
+          "description": "Architecture restrictions. Omission means APT host defaults, not any explicit architecture list.",
           "type": "array",
           "uniqueItems": true,
           "items": {
@@ -78,9 +80,15 @@
         },
         "signingKey": {
           "title": "Repository signing key",
-          "description": "Complete inline ASCII-armored OpenPGP public key written as a binary external .gpg keyring file.",
+          "description": "Complete inline ASCII-armored OpenPGP public key. Compared against existing explicit trust material; only new repositories require a managed binary keyring.",
           "type": "string",
           "minLength": 1
+        },
+        "enabled": {
+          "title": "Repository enabled",
+          "description": "Whether APT should use this repository. Disabled definitions still exist and remain discoverable.",
+          "type": "boolean",
+          "default": true
         },
         "_inDesiredState": {
           "title": "Instance is in the desired state",

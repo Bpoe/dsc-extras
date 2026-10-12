@@ -68,9 +68,12 @@ func TestValidateDesiredAndName(t *testing.T) {
 	if desired.Ensure != "Present" {
 		t.Fatalf("ensure = %q, want Present default", desired.Ensure)
 	}
-	absent := Repository{Name: "example", Ensure: "Absent"}
+	absent := Repository{Name: "example", Ensure: "Absent", URI: desired.URI, Suite: desired.Suite}
 	if err := ValidateDesired(&absent); err != nil {
-		t.Fatalf("Absent with only name failed validation: %v", err)
+		t.Fatalf("Absent with logical selector failed validation: %v", err)
+	}
+	if err := ValidateDesired(&Repository{Name: "example", Ensure: "Absent"}); err == nil {
+		t.Fatal("accepted filename-only removal")
 	}
 }
 

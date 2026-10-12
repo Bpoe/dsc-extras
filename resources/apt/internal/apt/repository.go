@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -22,6 +23,41 @@ type Repository struct {
 	Components    []string `json:"components,omitempty"`
 	Architectures []string `json:"architectures,omitempty"`
 	SigningKey    string   `json:"signingKey,omitempty"`
+	Enabled       *bool    `json:"enabled,omitempty"`
+}
+
+// AptRepository is one URI/suite/type combination, independent of its document.
+// Deb822 entries expand to the Cartesian product of Types, URIs and Suites.
+type AptRepository struct {
+	Type          string
+	URI           string
+	Suite         string
+	Components    []string
+	Architectures []string
+	Enabled       bool
+	Signing       SigningConfiguration
+	Options       map[string]string
+	removed       bool
+}
+
+type SigningConfiguration struct {
+	Keyrings     []string
+	Fingerprints []string
+	InlineKey    string
+}
+
+func (r Repository) enabled() bool {
+	return r.Enabled == nil || *r.Enabled
+}
+
+func ValidateSelector(repository Repository) error {
+	if err := ValidateName(repository.Name); err != nil {
+		return err
+	}
+	if err := validateURI(repository.URI); err != nil || !suitePattern.MatchString(repository.Suite) {
+		return errors.New("uri and suite are required to identify a logical repository; name only selects filenames for new repositories")
+	}
+	return nil
 }
 
 func ValidateName(name string) error {
@@ -32,7 +68,7 @@ func ValidateName(name string) error {
 }
 
 func ValidateDesired(repository *Repository) error {
-	if err := ValidateName(repository.Name); err != nil {
+	if err := ValidateSelector(*repository); err != nil {
 		return err
 	}
 	if repository.Ensure == "" {
@@ -126,19 +162,14 @@ func uniqueStrings(values []string) bool {
 }
 
 func equalStrings(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for i := range left {
-		if left[i] != right[i] {
-			return false
-		}
-	}
-	return true
+	left, right = slices.Clone(left), slices.Clone(right)
+	slices.Sort(left)
+	slices.Sort(right)
+	return slices.Equal(slices.Compact(left), slices.Compact(right))
 }
 
 func Equal(desired, actual Repository) bool {
-	if desired.Name != actual.Name || desired.Ensure != actual.Ensure {
+	if desired.Ensure != actual.Ensure {
 		return false
 	}
 	if desired.Ensure == "Absent" {
@@ -148,8 +179,20 @@ func Equal(desired, actual Repository) bool {
 	actualKey, actualErr := signingKeyBinary(actual.SigningKey)
 	return desiredErr == nil && actualErr == nil && bytes.Equal(desiredKey, actualKey) &&
 		desired.Ensure == actual.Ensure &&
-		desired.URI == actual.URI &&
+		repositoryURI(desired.URI) == repositoryURI(actual.URI) &&
 		desired.Suite == actual.Suite &&
+		desired.enabled() == actual.enabled() &&
 		equalStrings(desired.Components, actual.Components) &&
 		equalStrings(desired.Architectures, actual.Architectures)
+}
+
+func repositoryURI(uri string) string {
+	parsed, err := url.Parse(uri)
+	if err != nil || parsed.RawQuery != "" {
+		return uri
+	}
+	if !strings.HasSuffix(uri, "/") {
+		return uri + "/"
+	}
+	return uri
 }
