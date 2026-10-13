@@ -481,6 +481,115 @@ func TestCreatingSignedSourceDoesNotConflictWithExistingDebSrc(t *testing.T) {
 	assertUnchanged(t, before, snapshot(t, store.Root))
 }
 
+func TestRelatedDebSrcSecurityOptions(t *testing.T) {
+	for _, format := range []string{".list", ".sources"} {
+		for _, option := range []struct {
+			name, field, value string
+			reject             bool
+		}{
+			{name: "defaults"},
+			{name: "trusted", field: "Trusted", value: "yes", reject: true},
+			{name: "untrusted override", field: "Trusted", value: "no", reject: true},
+			{name: "insecure", field: "Allow-Insecure", value: "yes", reject: true},
+			{name: "weak", field: "Allow-Weak", value: "yes", reject: true},
+			{name: "downgrade", field: "Allow-Downgrade-To-Insecure", value: "yes", reject: true},
+			{name: "expiry unchecked", field: "Check-Valid-Until", value: "no", reject: true},
+			{name: "date unchecked", field: "Check-Date", value: "no", reject: true},
+			{name: "insecure denied", field: "Allow-Insecure", value: "no"},
+			{name: "weak denied", field: "Allow-Weak", value: "no"},
+			{name: "downgrade denied", field: "Allow-Downgrade-To-Insecure", value: "no"},
+			{name: "expiry checked", field: "Check-Valid-Until", value: "yes"},
+			{name: "date checked", field: "Check-Date", value: "yes"},
+		} {
+			for _, state := range []string{"compliant", "drift", "missing"} {
+				t.Run(format+"/"+option.name+"/"+state, func(t *testing.T) {
+					store := newTestStore(t)
+					desired := validDesired()
+					keyReference := store.keyringReference(desired.Name)
+					writePublicKeyring(t, store, desired.Name, desired.SigningKey)
+					if state != "missing" {
+						writeFile(t, store.sourcePath(desired.Name), string(serializeDeb822(desired, keyReference)))
+					}
+					source := strings.Replace(string(serializeDeb822(desired, keyReference)), "Types: deb\n", "Types: deb-src\n", 1)
+					if option.field != "" {
+						source += option.field + ": " + option.value + "\n"
+					}
+					if format == ".list" {
+						options := "signed-by=" + keyReference
+						if option.field != "" {
+							options += " " + strings.ToLower(option.field) + "=" + option.value
+						}
+						source = "deb-src [" + options + "] " + desired.URI + " " + desired.Suite + " main contrib\n"
+					}
+					path := fixtureFile(t, store, "/etc/apt/sources.list.d/related"+format, "# preserve source packages\r\n"+source)
+					if state == "drift" {
+						desired.Components = []string{"main"}
+					}
+					before := snapshot(t, store.Root)
+					if option.reject {
+						diagnostic := fmt.Sprintf("APT option %q=%q", strings.ToLower(option.field), option.value)
+						if state != "missing" {
+							if _, err := store.Get(desired); err == nil || !strings.Contains(err.Error(), path) ||
+								!strings.Contains(err.Error(), diagnostic) {
+								t.Errorf("Get ignored unsafe related source: %v", err)
+							}
+							if _, compliant, err := store.Test(desired); compliant || err == nil {
+								t.Errorf("Test = (%t, %v), want noncompliant with an error", compliant, err)
+							}
+						}
+						if _, err := store.Set(desired); err == nil ||
+							!strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), diagnostic) {
+							t.Errorf("Set must identify the unsafe related source and option: %v", err)
+						}
+						assertUnchanged(t, before, snapshot(t, store.Root))
+						return
+					}
+					if state == "compliant" {
+						assertCompliantNoOp(t, store, desired)
+						return
+					}
+					if _, err := store.Set(desired); err != nil {
+						t.Fatal(err)
+					}
+					assertUnchanged(t, map[string]fileSnapshot{path: before[path]}, snapshot(t, path))
+					assertCompliantNoOp(t, store, desired)
+				})
+			}
+		}
+	}
+}
+
+func TestDebSrcSecurityValidationOnlyAppliesToEnabledRelatedEntries(t *testing.T) {
+	for _, scope := range []string{"disabled", "different URI", "different suite"} {
+		t.Run(scope, func(t *testing.T) {
+			store := newTestStore(t)
+			desired := validDesired()
+			writePublicKeyring(t, store, desired.Name, desired.SigningKey)
+			writeFile(t, store.sourcePath(desired.Name), string(serializeDeb822(desired, store.keyringReference(desired.Name))))
+			related := desired
+			switch scope {
+			case "disabled":
+				enabled := false
+				related.Enabled = &enabled
+			case "different URI":
+				related.URI = "https://other.example"
+			case "different suite":
+				related.Suite = "other"
+			}
+			source := strings.Replace(string(serializeDeb822(related, store.keyringReference(desired.Name))), "Types: deb\n", "Types: deb-src\n", 1)
+			path := fixtureFile(t, store, "/etc/apt/sources.list.d/unrelated.sources", source+"Trusted: yes\n")
+			assertCompliantNoOp(t, store, desired)
+			before := snapshot(t, path)
+			desired.Components = []string{"main"}
+			if _, err := store.Set(desired); err != nil {
+				t.Fatal(err)
+			}
+			assertUnchanged(t, before, snapshot(t, path))
+			assertCompliantNoOp(t, store, desired)
+		})
+	}
+}
+
 func TestDiscoveryPropagatesFilesystemErrorsAndRejectsMalformedSources(t *testing.T) {
 	store := newTestStore(t)
 	fixtureFile(t, store, "/etc/apt/sources.list.d", "not a directory")

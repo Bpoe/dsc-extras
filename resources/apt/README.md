@@ -16,7 +16,11 @@ remove the old URI/suite explicitly if migrating it.
 Discovery reads `/etc/apt/sources.list`, `/etc/apt/sources.list.d/*.list`, and
 `/etc/apt/sources.list.d/*.sources`. Multiple lines/stanzas and Deb822
 multi-value Types, URIs, and Suites are supported. `deb-src` definitions are
-retained and checked for conflicting Release-file trust, not managed as `deb`.
+retained, not managed as `deb`. Enabled `deb-src` entries with the selected URI
+and suite must pass the same security-option validation as `deb` entries, as
+well as the existing `Signed-By` consistency check. Unsupported or unsafe
+options cause `Get`/`Test` errors for an existing binary repository and prevent
+`Set` from writing, including when creating a missing binary repository.
 
 `components` and `architectures` are compared as unordered sets. Omitted
 architectures mean APT's configured host defaults, **not** an arbitrary explicit
@@ -113,6 +117,28 @@ are not needed:
 This intentionally replaces the earlier filename-only `Get`/`Absent` contract.
 Install `dscapt` and `dscapt.dsc.resource.json` together on `PATH`. Changing
 system configuration requires sufficient filesystem permissions.
+
+### Changing suites explicitly
+
+Changing `suite` from `bookworm` to `trixie` selects a different repository; it
+does not migrate or remove the `bookworm` definition. If the old repository is
+no longer wanted, explicitly apply:
+
+```json
+{
+  "name": "docker",
+  "uri": "https://download.docker.com/linux/debian",
+  "suite": "bookworm",
+  "ensure": "Absent"
+}
+```
+
+Then apply the `Present` example above with `"suite": "trixie"` and, for example,
+`"name": "docker-trixie"`. A distinct name avoids colliding with the retained
+old source document/keyring when new files are needed. Existing trixie
+definitions are still discovered by URI and suite regardless of their names.
+This removes only the old `deb` definition; related `deb-src` entries must be
+managed separately.
 
 ## Build and check
 

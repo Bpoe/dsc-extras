@@ -207,6 +207,9 @@ func (s Store) observe(selector Repository, documents []*AptDocument) (Repositor
 		for _, entry := range doc.Entries {
 			if entry.Type == "deb-src" && len(found) > 0 && entry.Enabled &&
 				repositoryURI(entry.URI) == repositoryURI(selector.URI) && entry.Suite == selector.Suite {
+				if err := checkOptions(entry); err != nil {
+					return actual, found, fmt.Errorf("%s: %w", doc.Path, err)
+				}
 				first := found[0].document.Entries[found[0].index]
 				if !sameSigningReferences(first.Signing, entry.Signing) {
 					return actual, found, fmt.Errorf("conflicting deb-src signing configuration in %s; align Signed-By before managing this repository", doc.Path)
@@ -375,6 +378,9 @@ func checkPlannedTrust(documents []*AptDocument, desired Repository) error {
 		for _, entry := range document.Entries {
 			if entry.removed || !entry.Enabled || repositoryURI(entry.URI) != repositoryURI(desired.URI) || entry.Suite != desired.Suite {
 				continue
+			}
+			if err := checkOptions(entry); err != nil {
+				return fmt.Errorf("%s: %w", document.Path, err)
 			}
 			if first != nil && !sameSigningReferences(first.Signing, entry.Signing) {
 				return fmt.Errorf("change would conflict with Signed-By in %s; align related deb/deb-src entries explicitly", document.Path)
