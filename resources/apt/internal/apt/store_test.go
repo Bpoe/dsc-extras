@@ -107,8 +107,8 @@ func assertCompliantNoOp(t *testing.T, store Store, desired Repository) {
 		t.Fatalf("Get logical repository = (%+v, %v)", actual, err)
 	}
 	for i := 0; i < 2; i++ {
-		if _, compliant, err := store.Test(desired); err != nil || !compliant {
-			t.Fatalf("Test = (%t, %v), want compliant", compliant, err)
+		if _, differences, err := store.Test(desired); err != nil || differences == nil || len(differences) != 0 {
+			t.Fatalf("Test = (%v, %v), want empty differences", differences, err)
 		}
 		if _, err := store.Set(desired); err != nil {
 			t.Fatal(err)
@@ -177,6 +177,56 @@ func TestMissingRepositoryCreatesDeb822AndManagedBinaryKey(t *testing.T) {
 		t.Fatalf("invalid managed binary keyring: %+v, %v", key, err)
 	}
 	assertCompliantNoOp(t, store, desired)
+}
+
+func TestSemanticDifferencesDoNotWrite(t *testing.T) {
+	disabled := false
+	otherKey := otherTestKey(t)
+	for _, extension := range []string{".asc", ".gpg"} {
+		t.Run(extension, func(t *testing.T) {
+			store := newTestStore(t)
+			desired := validDesired()
+			desired.Architectures = []string{"amd64", "arm64"}
+			key := desired.SigningKey
+			if extension == ".gpg" {
+				binary, err := signingKeyBinary(key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				key = string(binary)
+			}
+			reference := "/usr/share/keyrings/external" + extension
+			fixtureFile(t, store, reference, key)
+			actual := desired
+			actual.Components = []string{"contrib", "main"}
+			actual.Architectures = []string{"arm64", "amd64"}
+			fixtureFile(t, store, "/etc/apt/sources.list.d/external.sources", string(serializeDeb822(actual, reference)))
+			desired.SigningKey = strings.ReplaceAll(publicTestKey, "\n", "\r\n")
+			assertCompliantNoOp(t, store, desired)
+
+			before := snapshot(t, store.Root)
+			desired.Components = []string{"main"}
+			desired.Architectures = nil
+			desired.Enabled = &disabled
+			desired.SigningKey = otherKey
+			want := []string{"components", "architectures", "signingKey", "enabled"}
+			if _, differences, err := store.Test(desired); err != nil || !slices.Equal(differences, want) {
+				t.Fatalf("Test drift = (%v, %v), want %v", differences, err, want)
+			}
+			desired.URI += "/missing"
+			if _, differences, err := store.Test(desired); err != nil || !slices.Equal(differences, []string{"ensure"}) {
+				t.Fatalf("Test missing = (%v, %v), want ensure only", differences, err)
+			}
+			desired.Ensure = "Absent"
+			if _, differences, err := store.Test(desired); err != nil || differences == nil || len(differences) != 0 {
+				t.Fatalf("Test absent = (%v, %v), want empty differences", differences, err)
+			}
+			if _, err := store.Set(desired); err != nil {
+				t.Fatal(err)
+			}
+			assertUnchanged(t, before, snapshot(t, store.Root))
+		})
+	}
 }
 
 func TestAllDocumentAndKeyringFormatsRoundTripWithoutWrites(t *testing.T) {
@@ -382,7 +432,7 @@ func TestSignedTrustAndArchitectureRestrictionsAreNotIgnored(t *testing.T) {
 			source += " " + desired.URI + " stable main contrib\n"
 			fixtureFile(t, store, "/etc/apt/sources.list", source)
 			before := snapshot(t, store.Root)
-			if _, compliant, _ := store.Test(desired); compliant {
+			if _, differences, err := store.Test(desired); err == nil && len(differences) == 0 {
 				t.Fatal("incompatible trust/architecture was treated as compliant")
 			}
 			assertUnchanged(t, before, snapshot(t, store.Root))
@@ -533,8 +583,8 @@ func TestRelatedDebSrcSecurityOptions(t *testing.T) {
 								!strings.Contains(err.Error(), diagnostic) {
 								t.Errorf("Get ignored unsafe related source: %v", err)
 							}
-							if _, compliant, err := store.Test(desired); compliant || err == nil {
-								t.Errorf("Test = (%t, %v), want noncompliant with an error", compliant, err)
+							if _, _, err := store.Test(desired); err == nil {
+								t.Error("Test ignored unsafe related source")
 							}
 						}
 						if _, err := store.Set(desired); err == nil ||

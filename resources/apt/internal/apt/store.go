@@ -246,12 +246,15 @@ func (s Store) Get(selector Repository) (Repository, error) {
 	return actual, err
 }
 
-func (s Store) Test(desired Repository) (Repository, bool, error) {
+func (s Store) Test(desired Repository) (Repository, []string, error) {
 	if err := ValidateDesired(&desired); err != nil {
-		return Repository{}, false, err
+		return Repository{}, nil, err
 	}
 	actual, err := s.Get(desired)
-	return actual, err == nil && Equal(desired, actual), err
+	if err != nil {
+		return actual, nil, err
+	}
+	return actual, DifferingProperties(desired, actual), nil
 }
 
 func (s Store) Set(desired Repository) (Repository, error) {
@@ -360,11 +363,11 @@ func (s Store) Set(desired Repository) (Repository, error) {
 	if err := document.WriteToDisk(); err != nil {
 		return Repository{}, err
 	}
-	actual, compliant, err := s.Test(desired)
+	actual, differences, err := s.Test(desired)
 	if err != nil {
 		return Repository{}, fmt.Errorf("read reconciled repository: %w", err)
 	}
-	if !compliant {
+	if len(differences) != 0 {
 		return Repository{}, errors.New("repository did not converge; inspect the current source definitions")
 	}
 	return actual, nil

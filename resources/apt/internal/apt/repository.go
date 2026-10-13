@@ -169,21 +169,39 @@ func equalStrings(left, right []string) bool {
 }
 
 func Equal(desired, actual Repository) bool {
+	return len(DifferingProperties(desired, actual)) == 0
+}
+
+// DifferingProperties compares logical state, not management labels or serialization.
+func DifferingProperties(desired, actual Repository) []string {
 	if desired.Ensure != actual.Ensure {
-		return false
+		return []string{"ensure"}
 	}
+	differences := []string{}
 	if desired.Ensure == "Absent" {
-		return true
+		return differences
+	}
+	if repositoryURI(desired.URI) != repositoryURI(actual.URI) {
+		differences = append(differences, "uri")
+	}
+	if desired.Suite != actual.Suite {
+		differences = append(differences, "suite")
+	}
+	if !equalStrings(desired.Components, actual.Components) {
+		differences = append(differences, "components")
+	}
+	if !equalStrings(desired.Architectures, actual.Architectures) {
+		differences = append(differences, "architectures")
 	}
 	desiredKey, desiredErr := signingKeyBinary(desired.SigningKey)
 	actualKey, actualErr := signingKeyBinary(actual.SigningKey)
-	return desiredErr == nil && actualErr == nil && bytes.Equal(desiredKey, actualKey) &&
-		desired.Ensure == actual.Ensure &&
-		repositoryURI(desired.URI) == repositoryURI(actual.URI) &&
-		desired.Suite == actual.Suite &&
-		desired.enabled() == actual.enabled() &&
-		equalStrings(desired.Components, actual.Components) &&
-		equalStrings(desired.Architectures, actual.Architectures)
+	if desiredErr != nil || actualErr != nil || !bytes.Equal(desiredKey, actualKey) {
+		differences = append(differences, "signingKey")
+	}
+	if desired.enabled() != actual.enabled() {
+		differences = append(differences, "enabled")
+	}
+	return differences
 }
 
 func repositoryURI(uri string) string {

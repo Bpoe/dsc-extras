@@ -1,6 +1,7 @@
 package apt
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -93,5 +94,80 @@ func TestExactPathSuiteRequiresNoComponents(t *testing.T) {
 	withoutComponents.Components = nil
 	if err := ValidateDesired(&withoutComponents); err == nil {
 		t.Fatal("distribution suite without components was accepted")
+	}
+}
+
+func TestDifferingPropertiesAndEqualAgree(t *testing.T) {
+	enabled, disabled := true, false
+	otherKey := otherTestKey(t)
+	for _, test := range []struct {
+		name   string
+		change func(desired, actual *Repository)
+		want   []string
+	}{
+		{name: "identical"},
+		{name: "management label", change: func(_, actual *Repository) { actual.Name = "external" }},
+		{name: "trailing URI slash", change: func(_, actual *Repository) { actual.URI += "/" }},
+		{name: "different URI", change: func(_, actual *Repository) { actual.URI += "/other" }, want: []string{"uri"}},
+		{name: "URI query slash is significant", change: func(desired, actual *Repository) {
+			desired.URI += "?channel=stable"
+			actual.URI = desired.URI + "/"
+		}, want: []string{"uri"}},
+		{name: "different suite", change: func(_, actual *Repository) { actual.Suite = "testing" }, want: []string{"suite"}},
+		{name: "unordered sets", change: func(desired, actual *Repository) {
+			desired.Architectures = []string{"amd64", "arm64"}
+			actual.Architectures = []string{"arm64", "amd64", "amd64"}
+			actual.Components = []string{"contrib", "main", "main"}
+		}},
+		{name: "different components", change: func(_, actual *Repository) { actual.Components = []string{"main"} }, want: []string{"components"}},
+		{name: "different architectures", change: func(_, actual *Repository) { actual.Architectures = []string{"arm64"} }, want: []string{"architectures"}},
+		{name: "host default architectures", change: func(desired, _ *Repository) { desired.Architectures = nil }, want: []string{"architectures"}},
+		{name: "empty architecture sets", change: func(desired, actual *Repository) {
+			desired.Architectures = nil
+			actual.Architectures = []string{}
+		}},
+		{name: "omitted enabled", change: func(_, actual *Repository) { actual.Enabled = &enabled }},
+		{name: "disabled", change: func(_, actual *Repository) { actual.Enabled = &disabled }, want: []string{"enabled"}},
+		{name: "equivalent armor", change: func(_, actual *Repository) {
+			actual.SigningKey = strings.Replace(publicTestKey, "\n\n", "\nComment: alternate armor\n\n", 1)
+			actual.SigningKey = strings.ReplaceAll(actual.SigningKey, "\n", "\r\n")
+		}},
+		{name: "different key", change: func(_, actual *Repository) { actual.SigningKey = otherKey }, want: []string{"signingKey"}},
+		{name: "missing key", change: func(_, actual *Repository) { actual.SigningKey = "" }, want: []string{"signingKey"}},
+		{name: "invalid keys are not equal", change: func(desired, actual *Repository) {
+			desired.SigningKey, actual.SigningKey = "invalid", "invalid"
+		}, want: []string{"signingKey"}},
+		{name: "missing repository", change: func(_, actual *Repository) {
+			*actual = Repository{Ensure: "Absent"}
+		}, want: []string{"ensure"}},
+		{name: "removal required", change: func(desired, _ *Repository) {
+			*desired = Repository{Ensure: "Absent"}
+		}, want: []string{"ensure"}},
+		{name: "already absent", change: func(desired, actual *Repository) {
+			desired.Ensure = "Absent"
+			*actual = Repository{Ensure: "Absent"}
+		}},
+		{name: "multiple differences", change: func(_, actual *Repository) {
+			actual.URI += "/other"
+			actual.Suite = "testing"
+			actual.Components = []string{"main"}
+			actual.Architectures = nil
+			actual.SigningKey = otherKey
+			actual.Enabled = &disabled
+		}, want: []string{"uri", "suite", "components", "architectures", "signingKey", "enabled"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			desired, actual := validDesired(), validDesired()
+			if test.change != nil {
+				test.change(&desired, &actual)
+			}
+			differences := DifferingProperties(desired, actual)
+			if differences == nil || !slices.Equal(differences, test.want) {
+				t.Fatalf("DifferingProperties = %v, want %v (non-nil)", differences, test.want)
+			}
+			if Equal(desired, actual) != (len(differences) == 0) {
+				t.Fatal("Equal disagrees with DifferingProperties")
+			}
+		})
 	}
 }
