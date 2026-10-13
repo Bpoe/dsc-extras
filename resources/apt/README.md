@@ -41,6 +41,13 @@ material. Trust overrides such as `Trusted: yes` or `Trusted: no`, disabled
 signature/freshness checks, and unsupported behavioral options produce
 actionable errors. Unknown Deb822 `X-` metadata is retained.
 
+`Test` uses DSC's `stateAndDiff` contract: `dscapt test` emits exactly two
+newline-delimited JSON values, the actual state including `_inDesiredState`,
+then an array of semantically differing property names (`[]` when compliant).
+The observed `signingKey` remains in the actual state even when its armor
+differs from the desired input. Compliance and differences use the same
+comparison; a missing repository desired `Present` reports only `ensure`.
+
 ## Preservation and safety
 
 `AptRepository` holds logical properties; `AptDocument` retains a source's path,
@@ -118,6 +125,37 @@ This intentionally replaces the earlier filename-only `Get`/`Absent` contract.
 Install `dscapt` and `dscapt.dsc.resource.json` together on `PATH`. Changing
 system configuration requires sufficient filesystem permissions.
 
+### Parameterized DSC configuration
+
+Use parameters to supply the Ubuntu codename (for example, `noble`), architecture
+(for example, `amd64`), and complete Docker public signing key:
+
+```yaml
+$schema: https://aka.ms/dsc/schemas/v3/bundled/config/document.json
+
+parameters:
+  ubuntuCodename:
+    type: string
+  architecture:
+    type: string
+  dockerSigningKey:
+    type: string
+
+resources:
+  - name: Docker APT Repository
+    type: DscExtras.Apt/Repository
+    properties:
+      name: docker
+      uri: https://download.docker.com/linux/ubuntu
+      suite: "[parameters('ubuntuCodename')]"
+      components:
+        - stable
+      architectures:
+        - "[parameters('architecture')]"
+      signingKey: "[parameters('dockerSigningKey')]"
+      enabled: true
+```
+
 ### Changing suites explicitly
 
 Changing `suite` from `bookworm` to `trixie` selects a different repository; it
@@ -165,3 +203,8 @@ is the public keyring extracted from
 Both were captured on October 12, 2026. Other cases use synthetic public test
 keys. The suite checks file bytes, identity, permissions, modification times,
 and directory contents to detect unwanted writes after round trips or Set.
+
+When `dsc` is on `PATH`, `go test ./...` also runs the manifest's `stateAndDiff`
+contract through the real DSC executable. The integration test redirects the
+manifest's test command to a test-process helper using a temporary APT root;
+it does not read or change the host's repositories. It skips when DSC is absent.

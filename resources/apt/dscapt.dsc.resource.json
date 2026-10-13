@@ -20,7 +20,7 @@
     "executable": "dscapt",
     "args": ["test"],
     "input": "stdin",
-    "return": "state"
+    "return": "stateAndDiff"
   },
   "schema": {
     "embedded": {

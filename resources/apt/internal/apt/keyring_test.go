@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -33,8 +34,8 @@ func TestMultipleKeyringsAndFingerprintTrustSelections(t *testing.T) {
 	assertCompliantNoOp(t, store, desired)
 
 	desired.SigningKey = publicTestKey
-	if _, compliant, err := store.Test(desired); err != nil || compliant {
-		t.Fatalf("extra trusted key was ignored: %t, %v", compliant, err)
+	if _, differences, err := store.Test(desired); err != nil || !slices.Equal(differences, []string{"signingKey"}) {
+		t.Fatalf("extra trusted key differences = %v, %v", differences, err)
 	}
 	entities, err := openpgp.ReadKeyRing(bytes.NewReader(first))
 	if err != nil {
@@ -223,8 +224,8 @@ func TestTestUsesBinaryKeyMaterial(t *testing.T) {
 		t.Fatalf("stored .gpg keyring invalid: keys=%d err=%v", len(entities), err)
 	}
 	desired.SigningKey = strings.ReplaceAll(publicTestKey, "\n", "\r\n")
-	if _, compliant, err := store.Test(desired); err != nil || !compliant {
-		t.Fatalf("Test equivalent armor=(%t,%v), want compliant", compliant, err)
+	if _, differences, err := store.Test(desired); err != nil || differences == nil || len(differences) != 0 {
+		t.Fatalf("Test equivalent armor=(%v,%v), want empty differences", differences, err)
 	}
 	other, err := openpgp.NewEntity("different synthetic test", "", "", nil)
 	if err != nil {
@@ -242,7 +243,7 @@ func TestTestUsesBinaryKeyMaterial(t *testing.T) {
 		t.Fatal(err)
 	}
 	desired.SigningKey = otherArmor.String()
-	if _, compliant, err := store.Test(desired); err != nil || compliant {
-		t.Fatalf("Test different key=(%t,%v), want drift", compliant, err)
+	if _, differences, err := store.Test(desired); err != nil || !slices.Equal(differences, []string{"signingKey"}) {
+		t.Fatalf("Test different key=(%v,%v), want signingKey drift", differences, err)
 	}
 }

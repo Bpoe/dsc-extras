@@ -59,14 +59,17 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, store apt.Sto
 		}
 		return writeJSON(stdout, actual, stderr)
 	case "test":
-		actual, inDesiredState, err := store.Test(instance)
+		actual, differences, err := store.Test(instance)
 		if err != nil {
 			return reportError(stderr, err.Error())
 		}
-		return writeJSON(stdout, testResult{
+		if code := writeJSON(stdout, testResult{
 			Repository:     actual,
-			InDesiredState: inDesiredState,
-		}, stderr)
+			InDesiredState: len(differences) == 0,
+		}, stderr); code != 0 {
+			return code
+		}
+		return writeJSON(stdout, differences, stderr)
 	default:
 		actual, err := store.Set(instance)
 		if err != nil {
