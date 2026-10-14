@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/dscapt.yml"
+      - ".github/tests/test_dscapt_release.py"
       - "resources/apt/**"
   push:
     branches:
@@ -12,6 +13,7 @@ on:
       - "dscapt-v*"
     paths:
       - ".github/workflows/dscapt.yml"
+      - ".github/tests/test_dscapt_release.py"
       - "resources/apt/**"
   workflow_dispatch:
 
@@ -40,6 +42,26 @@ jobs:
             exit 1
           fi
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Verify release commit is on main
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/dscapt-v')
+        run: |
+          fetch_args=(--no-tags)
+          if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then
+            fetch_args+=(--unshallow)
+          fi
+          git fetch "${fetch_args[@]}" origin '+refs/heads/main:refs/remotes/origin/main'
+          if ! tag_commit=$(git rev-parse --verify "${GITHUB_REF}^{commit}"); then
+            echo "::error::Release tag ${GITHUB_REF_NAME} does not resolve to a commit."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
+            echo "::error::Release tag ${GITHUB_REF_NAME} points to ${tag_commit}, which is not reachable from origin/main. Merge the commit into main before tagging a release."
+            exit 1
+          fi
+      - name: Test release safeguards
+        run: |
+          python3 -m pip install --disable-pip-version-check --target "$RUNNER_TEMP/dscapt-release-test-deps" PyYAML==6.0.3
+          PYTHONPATH="$RUNNER_TEMP/dscapt-release-test-deps" python3 ../../.github/tests/test_dscapt_release.py
       - uses: actions/setup-go@v5
         with:
           go-version-file: resources/apt/go.mod
@@ -112,6 +134,9 @@ jobs:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/dscapt-v')
     needs: [test, build]
     runs-on: ubuntu-latest
+    concurrency:
+      group: dscapt-release-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -120,7 +145,7 @@ jobs:
           pattern: dscapt-linux-*
           path: dist
           merge-multiple: true
-      - name: Publish release
+      - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -133,7 +158,13 @@ jobs:
               exit 1
             fi
           done
+          existing_tags=$(gh api --paginate "repos/${GH_REPO}/releases" --jq '.[].tag_name')
+          if grep -Fxq -- "$GITHUB_REF_NAME" <<< "$existing_tags"; then
+            echo "::error::A release or draft for ${GITHUB_REF_NAME} already exists; refusing to overwrite it."
+            exit 1
+          fi
           gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --draft \
             --verify-tag \
             --title "dscapt ${VERSION}" \
             --notes "Linux AMD64 and ARM64 ZIPs for dscapt ${VERSION}. Each ZIP contains dscapt, its DSC resource manifest, and LICENSE."

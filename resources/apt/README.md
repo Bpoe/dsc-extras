@@ -180,17 +180,26 @@ managed separately.
 
 ## Releases
 
-To publish a release, tag the intended commit and push that tag:
+Release tags must reference commits already merged into `main`. Fetch the latest
+`main`, tag the intended merged commit, and push that tag. For example, to release
+the current `origin/main`:
 
 ```sh
-git tag -a dscapt-v1.2.3 -m "dscapt 1.2.3"
+git fetch origin main
+git tag -a dscapt-v1.2.3 origin/main -m "dscapt 1.2.3"
 git push origin dscapt-v1.2.3
 ```
 
 The `dscapt` GitHub Actions workflow accepts stable `dscapt-vX.Y.Z` tags only;
 prerelease suffixes and leading zeroes in version components are not supported.
-After the checks and both builds succeed, it creates a
-[GitHub Release](https://github.com/Bpoe/dsc-extras/releases) with these assets:
+Both lightweight and annotated tags are supported. Before the architecture
+builds start, the workflow resolves the tag to its commit, fetches the full
+history needed for `origin/main`, and checks that `main` contains that commit.
+Tagging an unmerged branch or an unrelated commit fails the release. The
+workflow does not move or modify tags.
+
+After the checks and both builds succeed, it creates an unpublished
+[draft GitHub Release](https://github.com/Bpoe/dsc-extras/releases) with these assets:
 
 - `dscapt-1.2.3-linux-amd64.zip` for x86-64 Linux.
 - `dscapt-1.2.3-linux-arm64.zip` for ARM64/AArch64 Linux.
@@ -200,8 +209,14 @@ The executable is built without CGO and retains its Linux executable permission
 in the archive. The tag supplies the version for both `dscapt --version` and the
 packaged manifest; the checked-in source versions are not changed.
 
-Download the ZIP for your architecture and extract it into a directory on
-`PATH`, keeping the manifest beside the executable. For example:
+The maintainer must inspect both ZIP assets in the draft and manually publish
+the release through GitHub. The workflow never automatically publishes a draft.
+Existing releases and drafts are not overwritten; rerunning the workflow for a
+tag that already has either will fail. Use a new version for subsequent changes.
+
+Once the maintainer publishes the release, download the ZIP for your architecture
+and extract it into a directory on `PATH`, keeping the manifest beside the
+executable. For example:
 
 ```sh
 install_dir="$HOME/.local/share/dscapt/1.2.3"
@@ -216,8 +231,8 @@ configuration still requires sufficient filesystem permissions.
 
 Branch, pull-request, and manually dispatched workflow runs upload ZIP workflow
 artifacts using the source version, but never publish GitHub releases. Ordinary
-local builds also retain the source version. Published releases are not
-overwritten; publish a new version for subsequent changes.
+CI runs do not require their commits to be on `main` and do not create drafts.
+Local builds also retain the source version.
 
 ## Build and check
 
