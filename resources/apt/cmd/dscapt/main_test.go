@@ -40,6 +40,13 @@ func call(t *testing.T, store apt.Store, operation, input string) (int, string, 
 	return code, stdout.String(), stderr.String()
 }
 
+func TestVersion(t *testing.T) {
+	code, stdout, stderr := call(t, makeStore(t), "--version", "not JSON")
+	if code != 0 || stdout != version+"\n" || stderr != "" {
+		t.Fatalf("--version returned (%d, %q, %q), want (0, %q, \"\")", code, stdout, stderr, version+"\n")
+	}
+}
+
 func decodeTestOutput(t *testing.T, output string) (testResult, []string) {
 	t.Helper()
 	lines := strings.Split(output, "\n")

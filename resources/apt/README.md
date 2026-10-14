@@ -178,6 +178,62 @@ definitions are still discovered by URI and suite regardless of their names.
 This removes only the old `deb` definition; related `deb-src` entries must be
 managed separately.
 
+## Releases
+
+Release tags must reference commits already merged into `main`. Fetch the latest
+`main`, tag the intended merged commit, and push that tag. For example, to release
+the current `origin/main`:
+
+```sh
+git fetch origin main
+git tag -a dscapt-v1.2.3 origin/main -m "dscapt 1.2.3"
+git push origin dscapt-v1.2.3
+```
+
+The `dscapt` GitHub Actions workflow accepts stable `dscapt-vX.Y.Z` tags only;
+prerelease suffixes and leading zeroes in version components are not supported.
+Both lightweight and annotated tags are supported. Before the architecture
+builds start, the workflow resolves the tag to its commit, fetches the full
+history needed for `origin/main`, and checks that `main` contains that commit.
+Tagging an unmerged branch or an unrelated commit fails the release. The
+workflow does not move or modify tags.
+
+After the checks and both builds succeed, it creates an unpublished
+[draft GitHub Release](https://github.com/Bpoe/dsc-extras/releases) with these assets:
+
+- `dscapt-1.2.3-linux-amd64.zip` for x86-64 Linux.
+- `dscapt-1.2.3-linux-arm64.zip` for ARM64/AArch64 Linux.
+
+Each ZIP contains `dscapt`, `dscapt.dsc.resource.json`, and `LICENSE` at its root.
+The executable is built without CGO and retains its Linux executable permission
+in the archive. The tag supplies the version for both `dscapt --version` and the
+packaged manifest; the checked-in source versions are not changed.
+
+The maintainer must inspect both ZIP assets in the draft and manually publish
+the release through GitHub. The workflow never automatically publishes a draft.
+Existing releases and drafts are not overwritten; rerunning the workflow for a
+tag that already has either will fail. Use a new version for subsequent changes.
+
+Once the maintainer publishes the release, download the ZIP for your architecture
+and extract it into a directory on `PATH`, keeping the manifest beside the
+executable. For example:
+
+```sh
+install_dir="$HOME/.local/share/dscapt/1.2.3"
+mkdir -p "$install_dir"
+unzip dscapt-1.2.3-linux-amd64.zip -d "$install_dir"
+export PATH="$install_dir:$PATH"
+dscapt --version
+```
+
+Persist the `PATH` addition in your shell configuration as needed. Changing APT
+configuration still requires sufficient filesystem permissions.
+
+Branch, pull-request, and manually dispatched workflow runs upload ZIP workflow
+artifacts using the source version, but never publish GitHub releases. Ordinary
+CI runs do not require their commits to be on `main` and do not create drafts.
+Local builds also retain the source version.
+
 ## Build and check
 
 Run from `resources/apt`:
