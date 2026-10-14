@@ -6,6 +6,10 @@ on:
       - ".github/workflows/dscapt.yml"
       - "resources/apt/**"
   push:
+    branches:
+      - "**"
+    tags:
+      - "dscapt-v*"
     paths:
       - ".github/workflows/dscapt.yml"
       - "resources/apt/**"
@@ -17,11 +21,25 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     defaults:
       run:
         working-directory: resources/apt
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve version
+        id: version
+        run: |
+          version=$(jq -er '.version | select(type == "string")' dscapt.dsc.resource.json)
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/dscapt-v* ]]; then
+            version="${GITHUB_REF#refs/tags/dscapt-v}"
+          fi
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Expected a stable X.Y.Z version; release tags must use dscapt-vX.Y.Z."
+            exit 1
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v5
         with:
           go-version-file: resources/apt/go.mod
@@ -49,16 +67,73 @@ jobs:
         with:
           go-version-file: resources/apt/go.mod
           cache-dependency-path: resources/apt/go.mod
-      - name: Build
+      - name: Build and package
         env:
+          CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.test.outputs.version }}
         run: |
-          mkdir -p "dist/linux-${GOARCH}"
-          go build -o "dist/linux-${GOARCH}/dscapt" ./cmd/dscapt
-          cp dscapt.dsc.resource.json "dist/linux-${GOARCH}/"
+          package_dir="dist/linux-${GOARCH}"
+          mkdir -p "$package_dir"
+          go build -trimpath -ldflags "-X main.version=${VERSION}" -o "$package_dir/dscapt" ./cmd/dscapt
+          jq --arg version "$VERSION" '.version = $version' dscapt.dsc.resource.json > "$package_dir/dscapt.dsc.resource.json"
+          cp ../../LICENSE "$package_dir/"
+          chmod 755 "$package_dir/dscapt"
+          (
+            cd "$package_dir"
+            zip -X "../dscapt-${VERSION}-linux-${GOARCH}.zip" dscapt dscapt.dsc.resource.json LICENSE
+          )
+      - name: Verify package
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          archive="dist/dscapt-${VERSION}-linux-${GOARCH}.zip"
+          check_dir="dist/check-${GOARCH}"
+          unzip -t "$archive"
+          unzip -q "$archive" -d "$check_dir"
+          test -x "$check_dir/dscapt"
+          test "$(jq -r '.version' "$check_dir/dscapt.dsc.resource.json")" = "$VERSION"
+          build_info=$(go version -m "$check_dir/dscapt")
+          grep -Fq 'GOOS=linux' <<< "$build_info"
+          grep -Fq "GOARCH=${GOARCH}" <<< "$build_info"
+          grep -Fq 'CGO_ENABLED=0' <<< "$build_info"
+          if [[ "$GOARCH" == amd64 ]]; then
+            test "$("$check_dir/dscapt" --version)" = "$VERSION"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: dscapt-linux-${{ matrix.goarch }}
-          path: resources/apt/dist/linux-${{ matrix.goarch }}/
+          path: resources/apt/dist/dscapt-${{ needs.test.outputs.version }}-linux-${{ matrix.goarch }}.zip
           if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/dscapt-v')
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dscapt-linux-*
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          assets=("dist/dscapt-${VERSION}-linux-amd64.zip" "dist/dscapt-${VERSION}-linux-arm64.zip")
+          for asset in "${assets[@]}"; do
+            if [[ ! -s "$asset" ]]; then
+              echo "::error::Missing release asset: $asset"
+              exit 1
+            fi
+          done
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --verify-tag \
+            --title "dscapt ${VERSION}" \
+            --notes "Linux AMD64 and ARM64 ZIPs for dscapt ${VERSION}. Each ZIP contains dscapt, its DSC resource manifest, and LICENSE."

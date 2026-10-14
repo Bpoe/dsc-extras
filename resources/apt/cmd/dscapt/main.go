@@ -12,10 +12,9 @@ import (
 	"github.com/Bpoe/dsc-extras/resources/apt/internal/apt"
 )
 
-const (
-	version       = "0.1.0"
-	maxInputBytes = 1 << 20
-)
+const maxInputBytes = 1 << 20
+
+var version = "0.1.0"
 
 type testResult struct {
 	apt.Repository

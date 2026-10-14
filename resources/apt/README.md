@@ -178,6 +178,47 @@ definitions are still discovered by URI and suite regardless of their names.
 This removes only the old `deb` definition; related `deb-src` entries must be
 managed separately.
 
+## Releases
+
+To publish a release, tag the intended commit and push that tag:
+
+```sh
+git tag -a dscapt-v1.2.3 -m "dscapt 1.2.3"
+git push origin dscapt-v1.2.3
+```
+
+The `dscapt` GitHub Actions workflow accepts stable `dscapt-vX.Y.Z` tags only;
+prerelease suffixes and leading zeroes in version components are not supported.
+After the checks and both builds succeed, it creates a
+[GitHub Release](https://github.com/Bpoe/dsc-extras/releases) with these assets:
+
+- `dscapt-1.2.3-linux-amd64.zip` for x86-64 Linux.
+- `dscapt-1.2.3-linux-arm64.zip` for ARM64/AArch64 Linux.
+
+Each ZIP contains `dscapt`, `dscapt.dsc.resource.json`, and `LICENSE` at its root.
+The executable is built without CGO and retains its Linux executable permission
+in the archive. The tag supplies the version for both `dscapt --version` and the
+packaged manifest; the checked-in source versions are not changed.
+
+Download the ZIP for your architecture and extract it into a directory on
+`PATH`, keeping the manifest beside the executable. For example:
+
+```sh
+install_dir="$HOME/.local/share/dscapt/1.2.3"
+mkdir -p "$install_dir"
+unzip dscapt-1.2.3-linux-amd64.zip -d "$install_dir"
+export PATH="$install_dir:$PATH"
+dscapt --version
+```
+
+Persist the `PATH` addition in your shell configuration as needed. Changing APT
+configuration still requires sufficient filesystem permissions.
+
+Branch, pull-request, and manually dispatched workflow runs upload ZIP workflow
+artifacts using the source version, but never publish GitHub releases. Ordinary
+local builds also retain the source version. Published releases are not
+overwritten; publish a new version for subsequent changes.
+
 ## Build and check
 
 Run from `resources/apt`:
