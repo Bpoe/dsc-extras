@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -167,8 +168,13 @@ func TestDNFNativeInstallation(t *testing.T) {
 		replacement := buildRPM(t, "dscpm-replacement", "2-1", "Obsoletes: dscpm-victim\nProvides: dscpm-victim")
 		before := string(nativeRun(t, "rpm", "-qa", "--queryformat", queryFormat))
 		calls, hist := executor.mutations, history(t)
-		if _, err := m.Set(t.Context(), desired(replacement)); err == nil || !strings.Contains(err.Error(), "protected") {
-			t.Fatalf("expected native DNF protection to reject replacement: %v", err)
+		_, err := m.Set(t.Context(), desired(replacement))
+		var commandError *packages.CommandError
+		nativeProtection := errors.As(err, &commandError) && strings.Contains(commandError.Stderr, "protected") &&
+			strings.Contains(commandError.Stderr, "dscpm-victim")
+		preflightProtection := err != nil && strings.Contains(err.Error(), `unsafe or unknown transaction row "replacing  dscpm-victim.noarch`)
+		if !nativeProtection && !preflightProtection {
+			t.Fatalf("expected native protection or explicit preflight replacement rejection: %v", err)
 		}
 		if executor.mutations != calls || history(t) != hist ||
 			string(nativeRun(t, "rpm", "-qa", "--queryformat", queryFormat)) != before {

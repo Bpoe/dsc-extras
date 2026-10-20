@@ -70,9 +70,9 @@ func (m *PackageManager) Set(ctx context.Context, desired packages.Packages) (re
 		return result, fmt.Errorf("safe installation requires the tested DNF 4 CLI shipped with RHEL 8/9/10; found %q", output)
 	}
 
-	// DNF's native protected-package check rejects both erasures and Obsoletes
-	// before executing its RPM transaction, while allowing same-identity upgrades.
-	// A file avoids OS argument-length limits on large installed inventories.
+	// Native protection is defense in depth, not a replacement for preflight:
+	// some libdnf versions still allow an obsoleting provider. A file avoids
+	// OS argument-length limits on large installed inventories.
 	protection, err := os.CreateTemp("", "dscpm-protected-*.conf")
 	if err != nil {
 		return result, fmt.Errorf("create DNF package protection: %w", err)

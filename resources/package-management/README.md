@@ -317,12 +317,15 @@ capability/provides match or name prefix from being accepted as the request.
 If dependencies would change an already-compliant member of the requested
 batch, Set refuses that transaction rather than silently upgrading it.
 
-The executing DNF command protects **every initially installed package name**
-using its native `protected_packages` solver check, which covers individual
-installed architectures and rejects erasures and Obsoletes while permitting
-same-identity upgrades/downgrades. The temporary protection list is removed
-after the operation. Obsoletes processing and install-only pruning are disabled;
-old kernels are not automatically deleted to enforce an install-only limit.
+The executing DNF command additionally requests native `protected_packages`
+protection for **every initially installed package name**. This is defense in
+depth, not a substitute for preflight: some libdnf versions can still propose an
+obsoleting provider despite that protection. Both plans must therefore explicitly
+reject every `replacing` row as well as removal actions. The temporary protection
+list is removed after the operation. Commands also set `obsoletes=False` and
+disable install-only pruning; old kernels are not automatically deleted to
+enforce an install-only limit. The obsoletes option alone does not prevent an
+explicitly requested RPM from replacing another installed package.
 No `--allowerasing`, `--skip-broken`, `--nogpgcheck`, direct RPM installs, deleted
 lock files, or dependency/signature bypasses are used. Host repository and local
 package signature policy is retained, including enabled subscription plugins.
@@ -337,10 +340,11 @@ failures, dependency conflicts and lock failures produce errors with native
 diagnostics and exit status. Repository configuration is not created or repaired.
 
 **Concurrency and rollback:** preflights are not an atomic reservation of a
-transaction. Native DNF/RPM locking remains in use, and the protected list guards
-the inventory observed by Set; it cannot cover packages installed by an external
-writer after the final inventory check. Serialize other package/repository
-maintenance with `dscd`. Package scripts, cancellation and failed transactions
+transaction. Native DNF/RPM locking remains in use, but native protection alone
+does not guarantee that a newly resolved transaction cannot replace a package.
+External inventory, metadata, configuration or artifact changes after the final
+checks can invalidate the plan. Serialize other package/repository maintenance
+with `dscd`. Package scripts, cancellation and failed transactions
 can leave changes behind; this resource does not promise rollback. Inspect
 native package-manager state before retrying concurrently.
 
@@ -365,6 +369,11 @@ Quay namespace for that release. Native runs exercised DNF 4.7/RPM 4.14 on
 Rocky 8, DNF 4.14/RPM 4.16 on Rocky 9, and DNF 4.20/RPM 4.19 on Rocky 10.
 All three expose the required embedded RPM comparison and DNF 4 transaction
 format; Rocky 10 still ships DNF 4, not DNF 5.
+Rocky 10's native solver proposed a `replacing` row for a fixture with both
+`Obsoletes` and `Provides` despite native protection; the resource's preflight
+rejected it before mutation. The integration test accepts either a native
+protected-package rejection or this explicit preflight rejection, and requires
+unchanged RPM inventory and DNF history in both cases.
 RHEL and AlmaLinux compatibility follows their
 DNF 4/RPM interfaces; subscription-enabled RHEL images are not exercised in CI.
 
