@@ -261,9 +261,9 @@ the entire batch, not one invocation per entry. Only noncompliant local artifact
 are installed. In a necessary mixed install, an already-compliant exact local
 package may also appear as a `name:architecture=installedVersion` solver
 constraint, not an archive path, to prevent dependency resolution from changing
-its version; it does not reinstall the compliant archive. Compliant unversioned repository packages
-are excluded; an entirely compliant group remains a strict no-op. APT may
-install dependencies needed by that transaction.
+its version; it does not reinstall the compliant archive. Compliant unversioned
+repository packages are excluded; an entirely compliant group remains a strict
+no-op. APT may install dependencies needed by that transaction.
 Package mutations and cache updates require root/equivalent privileges and the
 host's APT/dpkg tools; failures such as unavailable versions, dependency
 conflicts, or package-manager locks are errors, not successful compliance.
@@ -289,9 +289,13 @@ The read-only `state` property summarizes installation across the request:
 have active installation state (residual configuration files are acceptable),
 and `Mixed` covers a partially installed batch or an incomplete dpkg installation.
 This is observed state, not a third allowed value for desired `ensure`. A package
-can be installed but still fail an exact-version comparison. The output
-`ensure` preserves the normalized desired intent rather than reporting observed
-installation.
+can be installed but still fail an exact-version comparison. All top-level input
+properties (`name`, `ensure`, and any `version` or options) retain normalized
+desired intent in the output, not observed installation. In particular, a
+top-level `version` remains the requested target even when the installed version
+differs. Read actual installed versions and architectures only from
+`packages[].version` and `packages[].architecture`, and aggregate installation
+from `state`.
 
 The read-only `packages` array reports one entry per requested package:
 
@@ -306,8 +310,11 @@ The read-only `packages` array reports one entry per requested package:
 
 The entries are sorted by `requestedName`; `version` and `architecture` can be
 omitted when unavailable. Do not supply `state` or `packages` as desired
-properties. `Test` uses the same `stateAndDiff` contract as the repository resource: actual state with
-`_inDesiredState`, followed by the array of differing property names.
+properties. `Test` uses the same `stateAndDiff` contract as the repository
+resource: actual state with `_inDesiredState`, followed by the array of differing
+property names.
+Real DSC `stateAndDiff` explicitly reports `version` differences independently
+of the retained top-level intent fields.
 
 ### Package examples
 

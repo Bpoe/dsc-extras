@@ -123,16 +123,7 @@ func packageInstall(allow bool, names ...string) packageStep {
 
 func packageDeb(t *testing.T, name string) string {
 	t.Helper()
-	// Keep test artifacts in the repository, never in the host's temporary area.
-	directory, err := os.MkdirTemp(".", ".packages-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(directory) })
-	path, err := filepath.Abs(filepath.Join(directory, name))
-	if err != nil {
-		t.Fatal(err)
-	}
+	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, []byte("fake .deb; only the executor reads metadata"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -393,6 +384,8 @@ func TestPackagesLocalValidation(t *testing.T) {
 		{"empty version", packageDesired(path), append(architectureSteps(), packageMetadata(path, "local-app", "", "amd64"))},
 		{"newline version", packageDesired(path), append(architectureSteps(), packageMetadata(path, "local-app", "1\n2", "amd64"))},
 		{"duplicate identity", packageDesired(path, "local-app"), append(architectureSteps(), packageMetadata(path, "local-app", "1", "all"), packageVersion("1"))},
+		{"local all versus foreign", packageDesired(path, "local-app:arm64"), append(architectureSteps(), packageMetadata(path, "local-app", "1", "all"), packageVersion("1"))},
+		{"local foreign versus all", packageDesired(path, "local-app:all"), append(architectureSteps(), packageMetadata(path, "local-app", "1", "arm64"), packageVersion("1"))},
 		{"alias duplicate", packageDesired("local-app", "local-app:amd64"), architectureSteps()},
 		{"all versus foreign", packageDesired("local-app:all", "local-app:arm64"), architectureSteps()},
 	} {
@@ -536,6 +529,11 @@ func TestPackagesForeignSelectorAndAbsentAll(t *testing.T) {
 	if err != nil || result.Packages[0].Architecture != "arm64" || result.Packages[0].Version != "2" {
 		t.Fatalf("foreign selector = %+v, %v", result, err)
 	}
+	steps = append(architectureSteps(), packageQuery("bash", packageInstalled("bash", "1", "all")))
+	result, err = packageManagerFixture(t, steps...).Get(context.Background(), desired)
+	if err != nil || result.State != "Present" || result.Packages[0].Architecture != "all" {
+		t.Fatalf("foreign repository selector must accept all: %+v, %v", result, err)
+	}
 	desired = packageDesired("bash")
 	desired.Ensure = "Absent"
 	steps = append(architectureSteps(),
@@ -544,6 +542,25 @@ func TestPackagesForeignSelectorAndAbsentAll(t *testing.T) {
 		packageMissing("bash"))
 	if _, err := packageManagerFixture(t, steps...).Set(context.Background(), desired); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPackagesLocalRequiresExactArchitecture(t *testing.T) {
+	for _, tc := range []struct{ archive, installed string }{
+		{"all", "amd64"},
+		{"amd64", "all"},
+		{"arm64", "all"},
+	} {
+		t.Run(tc.archive+" versus "+tc.installed, func(t *testing.T) {
+			path := packageDeb(t, "app.deb")
+			steps := append(architectureSteps(), packageMetadata(path, "local-app", "1", tc.archive), packageVersion("1"),
+				packageQuery("local-app", packageInstalled("local-app", "1", tc.installed)))
+			result, differences, err := packageManagerFixture(t, steps...).Test(context.Background(), packageDesired(path))
+			if err != nil || result.State != "Absent" || len(differences) != 1 || differences[0] != "ensure" ||
+				result.Packages[0].Installed {
+				t.Fatalf("local archive architecture must match exactly: %+v, %v, %v", result, differences, err)
+			}
+		})
 	}
 }
 
@@ -577,6 +594,43 @@ func TestPackagesMixedLocalAndRepository(t *testing.T) {
 		packageQuery("bash", packageInstalled("bash", "1", "amd64")),
 	)
 	if _, err := packageManagerFixture(t, steps...).Set(context.Background(), packageDesired("bash", path)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPackagesSetPreservesCompliantLocalSolverConstraint(t *testing.T) {
+	first := packageDeb(t, "first.deb")
+	second := packageDeb(t, "second.deb")
+	steps := append(architectureSteps(),
+		packageMetadata(first, "local-app-a", "1-0", "amd64"), packageVersion("1-0"),
+		packageMetadata(second, "local-app-b", "2", "amd64"), packageVersion("2"),
+		packageQuery("local-app-a", packageInstalled("local-app-a", "1", "amd64")),
+		packageComparison("1", "eq", "1-0", true),
+		packageMissing("local-app-b"),
+		packageQuery("bash", packageInstalled("bash", "3", "amd64")),
+		packageInstall(false, "local-app-a:amd64=1", second),
+		packageQuery("local-app-a", packageInstalled("local-app-a", "1", "amd64")),
+		packageComparison("1", "eq", "1-0", true),
+		packageQuery("local-app-b", packageInstalled("local-app-b", "2", "amd64")),
+		packageComparison("2", "eq", "2", true),
+		packageQuery("bash", packageInstalled("bash", "3", "amd64")),
+	)
+	result, err := packageManagerFixture(t, steps...).Set(context.Background(), packageDesired("bash", second, first))
+	if err != nil || result.State != "Present" {
+		t.Fatalf("result = %+v, err = %v", result, err)
+	}
+}
+
+func TestPackagesSetCompliantLocalRemainsNoOp(t *testing.T) {
+	path := packageDeb(t, "app.deb")
+	desired := packageDesired(path)
+	desired.UpdateCache = true
+	steps := append(architectureSteps(),
+		packageMetadata(path, "local-app", "1", "all"), packageVersion("1"),
+		packageQuery("local-app", packageInstalled("local-app", "1", "all")),
+		packageComparison("1", "eq", "1", true),
+	)
+	if _, err := packageManagerFixture(t, steps...).Set(context.Background(), desired); err != nil {
 		t.Fatal(err)
 	}
 }

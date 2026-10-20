@@ -9,7 +9,8 @@ directory and can be built, tested, and released independently.
 - [Package management component (`dscpm`)](resources/package-management/README.md)
   provides `DscExtras.PackageManagement/aptRepositories` to manage APT
   repositories and `DscExtras.PackageManagement/packages` to manage repository
-  packages and local Debian archives in batched APT transactions. The compatibility manifest preserves
+  packages and local Debian archives in batched APT transactions. The
+  compatibility manifest preserves
   `DscExtras.Apt/Repository` for existing DSC configurations; direct `dscapt`
   CLI users must migrate to `dscpm aptRepositories`. DNF repositories and
   DNF/RPM packages remain future scope.

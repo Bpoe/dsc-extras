@@ -2,14 +2,68 @@ package apt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestPackagesNativePipeHelper(t *testing.T) {
+	switch os.Getenv("DSCPM_PACKAGE_PIPE_HELPER") {
+	case "parent":
+		executable, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		child := exec.Command(executable, "-test.run=^TestPackagesNativePipeHelper$")
+		child.Env = append(os.Environ(), "DSCPM_PACKAGE_PIPE_HELPER=child")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		if err := child.Start(); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Println(child.Process.Pid)
+		time.Sleep(30 * time.Second)
+	case "child":
+		time.Sleep(30 * time.Second)
+	}
+}
+
+func TestPackagesNativeCancellationBoundsInheritedPipes(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DSCPM_PACKAGE_PIPE_HELPER", "parent")
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = NewPackageManager(nil).run(ctx, executable, "-test.run=^TestPackagesNativePipeHelper$")
+	elapsed := time.Since(start)
+	var commandError *PackageCommandError
+	if !errors.As(err, &commandError) {
+		t.Fatalf("expected command error with child PID, got %v", err)
+	}
+	pid, parseErr := strconv.Atoi(strings.TrimSpace(commandError.Stdout))
+	if parseErr != nil {
+		t.Fatalf("helper did not report child PID: %q: %v", commandError.Stdout, parseErr)
+	}
+	child, findErr := os.FindProcess(pid)
+	if findErr != nil {
+		t.Fatal(findErr)
+	}
+	defer func() { _ = child.Kill() }()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("native deadline lost: %v", err)
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("inherited pipes exceeded finite drain timeout: %s", elapsed)
+	}
+}
 
 // Only archive building and Get/Test are used here; no package transaction runs.
 func TestPackagesNativeReadOnly(t *testing.T) {
@@ -58,9 +112,7 @@ func TestPackagesNativeReadOnly(t *testing.T) {
 		t.Fatalf("archive metadata did not resolve to installed bash: %+v, differences %v", actual, differences)
 	}
 
-	// The repository-local random fixture directory makes an installed-name
-	// collision extremely unlikely while retaining Debian's package grammar.
-	missingName := "dsc-extras-uninstalled-test-" + strings.TrimPrefix(filepath.Base(directory), ".packages-test-")
+	missingName := fmt.Sprintf("dsc-extras-uninstalled-test-%d", time.Now().UnixNano())
 	buildArchive(missingName, "1", installed.Architecture)
 	actual, differences, err = manager.Test(ctx, packageDesired(artifact))
 	if err != nil {

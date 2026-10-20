@@ -79,6 +79,7 @@ type packageOSExecutor struct{}
 func (packageOSExecutor) Execute(ctx context.Context, program string, args, env []string) ([]byte, []byte, error) {
 	command := exec.CommandContext(ctx, program, args...)
 	command.Env = append(os.Environ(), env...)
+	command.WaitDelay = 5 * time.Second
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err := command.Run()
@@ -310,7 +311,7 @@ func (m *PackageManager) observe(ctx context.Context, entry resolvedPackage) (Pa
 		if !packageArchitecture.MatchString(fields[3]) {
 			return state, fmt.Errorf("unexpected dpkg architecture for %q", entry.name)
 		}
-		if fields[3] != entry.architecture && fields[3] != "all" {
+		if fields[3] != entry.architecture && (entry.local || fields[3] != "all") {
 			continue
 		}
 		if found {
@@ -418,6 +419,12 @@ func (m *PackageManager) Set(ctx context.Context, desired Packages) (Packages, e
 	var arguments []string
 	for index, entry := range entries {
 		if compliant[index] {
+			if desired.Ensure == "Present" && entry.local {
+				// Keep dependency resolution from upgrading an exact artifact that
+				// already complies; this pins the installed version, not a reinstall.
+				state := before.Packages[index]
+				arguments = append(arguments, entry.name+":"+state.Architecture+"="+state.Version)
+			}
 			continue
 		}
 		if desired.Ensure == "Present" && entry.version != "" && packageActive(before.Packages[index]) && before.Packages[index].Version != "" {
