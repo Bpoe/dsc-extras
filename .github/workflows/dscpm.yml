@@ -107,7 +107,7 @@ jobs:
           go test -v -count=1 ./internal/apt -run '^TestPackagesContainerRemoval$'
 
   build:
-    needs: test
+    needs: [test, apt-container]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
