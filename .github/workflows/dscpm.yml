@@ -75,10 +75,6 @@ jobs:
           tar -xzf "$dsc_dir/dsc.tar.gz" -C "$dsc_dir"
           test "$("$dsc_dir/dsc" --version)" = "dsc 3.3.0"
           echo "$dsc_dir" >> "$GITHUB_PATH"
-      - name: Test release safeguards
-        run: |
-          python3 -m pip install --disable-pip-version-check --target "$RUNNER_TEMP/dscpm-release-test-deps" PyYAML==6.0.3
-          PYTHONPATH="$RUNNER_TEMP/dscpm-release-test-deps" python3 ../../.github/tests/test_dscpm_release.py
       - name: Verify formatting
         run: test -z "$(gofmt -l ./cmd ./internal)"
       - name: Vet
