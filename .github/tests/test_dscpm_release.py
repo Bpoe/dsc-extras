@@ -198,6 +198,16 @@ class ReleaseSafeguards(unittest.TestCase):
         self.assertIn("../../.github/tests/test_dscpm_release.py",
                       step("test", "Test release safeguards")["run"])
         self.assertEqual(step("test", "Race test")["run"], "go test -race ./...")
+        self.assertEqual(WORKFLOW["jobs"]["test"]["env"]["DSCPM_REQUIRE_DSC"], "1")
+        install = step("test", "Install DSC")
+        self.assertNotIn("if", install)
+        self.assertNotIn("continue-on-error", install)
+        self.assertLess(test_steps.index(install), test_steps.index(step("test", "Test")))
+        self.assertLess(test_steps.index(install), test_steps.index(step("test", "Race test")))
+        self.assertIn("releases/download/v3.3.0/DSC-3.3.0-x86_64-linux.tar.gz", install["run"])
+        self.assertIn("sha256sum --check", install["run"])
+        self.assertIn('= "dsc 3.3.0"', install["run"])
+        self.assertIn('>> "$GITHUB_PATH"', install["run"])
         upload = next(item for item in WORKFLOW["jobs"]["build"]["steps"]
                       if item.get("uses") == "actions/upload-artifact@v4")
         self.assertEqual(upload["with"], {

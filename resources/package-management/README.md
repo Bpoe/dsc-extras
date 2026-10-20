@@ -300,6 +300,9 @@ keys. The suite checks file bytes, identity, permissions, modification times,
 and directory contents to detect unwanted writes after round trips or Set.
 
 When `dsc` is on `PATH`, `go test ./...` also runs both manifests' `stateAndDiff`
-contracts through the real DSC executable. The integration test redirects each
-manifest's test command to a test-process helper using a temporary APT root;
-it does not read or change the host's repositories. It skips when DSC is absent.
+contracts and discovery/Get/Test/Set through the real DSC executable. The integration
+test redirects each manifest's commands to a test-process helper using a temporary
+APT root; it does not read or change the host's repositories. Local runs skip when
+DSC is absent unless `DSCPM_REQUIRE_DSC=1` is set. CI installs checksum-verified
+DSC 3.3.0 and sets this variable for both normal and race tests, so missing DSC
+fails rather than silently skipping integration coverage.

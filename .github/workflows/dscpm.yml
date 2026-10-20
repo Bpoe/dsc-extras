@@ -23,6 +23,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      DSCPM_REQUIRE_DSC: "1"
     outputs:
       version: ${{ steps.version.outputs.version }}
     defaults:
@@ -62,6 +64,17 @@ jobs:
         with:
           go-version-file: resources/package-management/go.mod
           cache-dependency-path: resources/package-management/go.mod
+      - name: Install DSC
+        run: |
+          dsc_dir="$RUNNER_TEMP/dsc-3.3.0"
+          mkdir -p "$dsc_dir"
+          curl --fail --silent --show-error --location \
+            https://github.com/PowerShell/DSC/releases/download/v3.3.0/DSC-3.3.0-x86_64-linux.tar.gz \
+            --output "$dsc_dir/dsc.tar.gz"
+          echo "cf17d1a130b65332ec65380ee9368133101d13d8f40c1a501038920b1e9cd748  $dsc_dir/dsc.tar.gz" | sha256sum --check
+          tar -xzf "$dsc_dir/dsc.tar.gz" -C "$dsc_dir"
+          test "$("$dsc_dir/dsc" --version)" = "dsc 3.3.0"
+          echo "$dsc_dir" >> "$GITHUB_PATH"
       - name: Test release safeguards
         run: |
           python3 -m pip install --disable-pip-version-check --target "$RUNNER_TEMP/dscpm-release-test-deps" PyYAML==6.0.3

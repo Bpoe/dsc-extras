@@ -38,9 +38,35 @@ func TestDSCStateAndDiffIntegration(t *testing.T) {
 	}
 }
 
+func TestDSCAvailabilityPolicy(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	for _, required := range []string{"0", "1"} {
+		t.Run("required="+required, func(t *testing.T) {
+			t.Setenv("DSCPM_REQUIRE_DSC", required)
+			command := exec.CommandContext(t.Context(), executable,
+				"-test.run=^TestDSCStateAndDiffIntegration$", "-test.v")
+			output, err := command.CombinedOutput()
+			if required == "1" {
+				if err == nil || !bytes.Contains(output, []byte("DSC executable required")) {
+					t.Fatalf("missing required DSC must fail: %v\n%s", err, output)
+				}
+			} else if err != nil || !bytes.Contains(output, []byte("--- SKIP:")) {
+				t.Fatalf("optional missing DSC must skip: %v\n%s", err, output)
+			}
+		})
+	}
+}
+
 func testDSCStateAndDiffIntegration(t *testing.T, manifestName string) {
 	dsc, err := exec.LookPath("dsc")
 	if err != nil {
+		if os.Getenv("DSCPM_REQUIRE_DSC") == "1" {
+			t.Fatal("DSC executable required by DSCPM_REQUIRE_DSC but not available on PATH")
+		}
 		t.Skip("DSC executable not available on PATH")
 	}
 	executable, err := os.Executable()
