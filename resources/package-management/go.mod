@@ -1,4 +1,4 @@
-module github.com/Bpoe/dsc-extras/resources/apt
+module github.com/Bpoe/dsc-extras/resources/package-management
 
 go 1.25.0
 

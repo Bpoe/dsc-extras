@@ -1,9 +1,42 @@
-# dscapt: APT repository resource
+# dscpm: Package management component
 
-`dscapt` implements `Get`, `Test`, and `Set` for the DSCv3 resource
-`DscExtras.Apt/Repository`. It manages a logical binary-package (`deb`)
+`dscpm` is the package management component in `resources/package-management`,
+with its executable entry point in `cmd/dscpm`. It currently implements `Get`,
+`Test`, and `Set` for the DSCv3 resource
+`DscExtras.PackageManagement/aptRepositories`. It manages a logical binary-package (`deb`)
 repository, not a particular filename. Existing configurations created by
 Ansible, a Debian package, or DSC can already satisfy the desired state.
+
+Resource names use a PascalCase namespace (`DscExtras.PackageManagement`) and
+plural camelCase type (`aptRepositories`). Future scope includes APT packages,
+DNF repositories, and DNF packages, with types such as `packages` and
+`dnfRepositories`; none of these future capabilities is implemented.
+
+This is a structural rename from `dscapt` in `resources/apt`; core APT behavior
+and safety rules are unchanged. The new manifest
+`manifests/aptRepositories.dsc.resource.json` exposes
+`DscExtras.PackageManagement/aptRepositories`. The compatibility manifest
+`manifests/dscapt.dsc.resource.json` preserves `DscExtras.Apt/Repository` for
+existing DSC configurations. Both invoke `dscpm aptRepositories get`, `test`,
+and `set`. There is no `dscapt` binary shim: old direct CLI invocations and
+build paths must migrate to the new command and directory.
+
+## Command line and installation
+
+`dscpm --help` displays usage; `dscpm --version` displays the executable version.
+APT repository operations read a single JSON properties object from standard
+input:
+
+```sh
+dscpm aptRepositories get < repository.json
+dscpm aptRepositories test < repository.json
+dscpm aptRepositories set < repository.json
+```
+
+Install `dscpm`, `aptRepositories.dsc.resource.json`, and
+`dscapt.dsc.resource.json` together in a directory on `PATH`, with both manifests
+beside the executable. Changing system configuration requires sufficient
+filesystem permissions.
 
 ## Repository identity and state
 
@@ -41,7 +74,7 @@ material. Trust overrides such as `Trusted: yes` or `Trusted: no`, disabled
 signature/freshness checks, and unsupported behavioral options produce
 actionable errors. Unknown Deb822 `X-` metadata is retained.
 
-`Test` uses DSC's `stateAndDiff` contract: `dscapt test` emits exactly two
+`Test` uses DSC's `stateAndDiff` contract: `dscpm aptRepositories test` emits exactly two
 newline-delimited JSON values, the actual state including `_inDesiredState`,
 then an array of semantically differing property names (`[]` when compliant).
 The observed `signingKey` remains in the actual state even when its armor
@@ -67,6 +100,10 @@ A missing repository creates:
 
 - `/etc/apt/sources.list.d/<name>.sources`, marked as managed by DSC.
 - `/etc/apt/keyrings/<name>.gpg`, containing the supplied public key.
+
+The managed source marker remains `# Managed by dscapt: <name>` for compatibility
+with existing managed files. The rename does not rewrite this marker or change
+the ownership checks that allow safe managed-key rotation.
 
 An equivalent existing keyring at the creation path is reused unchanged.
 Unrelated files occupying either creation path are not overwritten. Existing
@@ -122,8 +159,8 @@ are not needed:
 ```
 
 This intentionally replaces the earlier filename-only `Get`/`Absent` contract.
-Install `dscapt` and `dscapt.dsc.resource.json` together on `PATH`. Changing
-system configuration requires sufficient filesystem permissions.
+Use these properties as the JSON input to `dscpm aptRepositories get`, `test`,
+or `set`, as appropriate.
 
 ### Parameterized DSC configuration
 
@@ -143,7 +180,7 @@ parameters:
 
 resources:
   - name: Docker APT Repository
-    type: DscExtras.Apt/Repository
+    type: DscExtras.PackageManagement/aptRepositories
     properties:
       name: docker
       uri: https://download.docker.com/linux/ubuntu
@@ -186,28 +223,30 @@ the current `origin/main`:
 
 ```sh
 git fetch origin main
-git tag -a dscapt-v1.2.3 origin/main -m "dscapt 1.2.3"
-git push origin dscapt-v1.2.3
+git tag -a dscpm-v1.2.3 origin/main -m "dscpm 1.2.3"
+git push origin dscpm-v1.2.3
 ```
 
-The `dscapt` GitHub Actions workflow accepts stable `dscapt-vX.Y.Z` tags only;
+The `dscpm` GitHub Actions workflow accepts stable `dscpm-vX.Y.Z` tags only;
 prerelease suffixes and leading zeroes in version components are not supported.
 Both lightweight and annotated tags are supported. Before the architecture
 builds start, the workflow resolves the tag to its commit, fetches the full
 history needed for `origin/main`, and checks that `main` contains that commit.
 Tagging an unmerged branch or an unrelated commit fails the release. The
-workflow does not move or modify tags.
+workflow does not move or modify tags; release tags are immutable. Historical
+`dscapt` releases and tags remain untouched.
 
 After the checks and both builds succeed, it creates an unpublished
 [draft GitHub Release](https://github.com/Bpoe/dsc-extras/releases) with these assets:
 
-- `dscapt-1.2.3-linux-amd64.zip` for x86-64 Linux.
-- `dscapt-1.2.3-linux-arm64.zip` for ARM64/AArch64 Linux.
+- `dscpm-1.2.3-linux-amd64.zip` for x86-64 Linux.
+- `dscpm-1.2.3-linux-arm64.zip` for ARM64/AArch64 Linux.
 
-Each ZIP contains `dscapt`, `dscapt.dsc.resource.json`, and `LICENSE` at its root.
+Each ZIP contains exactly four files at its root: `dscpm`,
+`aptRepositories.dsc.resource.json`, `dscapt.dsc.resource.json`, and `LICENSE`.
 The executable is built without CGO and retains its Linux executable permission
-in the archive. The tag supplies the version for both `dscapt --version` and the
-packaged manifest; the checked-in source versions are not changed.
+in the archive. The tag supplies the version for `dscpm --version` and both
+packaged manifests; the checked-in source versions are not changed.
 
 The maintainer must inspect both ZIP assets in the draft and manually publish
 the release through GitHub. The workflow never automatically publishes a draft.
@@ -215,15 +254,15 @@ Existing releases and drafts are not overwritten; rerunning the workflow for a
 tag that already has either will fail. Use a new version for subsequent changes.
 
 Once the maintainer publishes the release, download the ZIP for your architecture
-and extract it into a directory on `PATH`, keeping the manifest beside the
+and extract it into a directory on `PATH`, keeping both manifests beside the
 executable. For example:
 
 ```sh
-install_dir="$HOME/.local/share/dscapt/1.2.3"
+install_dir="$HOME/.local/share/dscpm/1.2.3"
 mkdir -p "$install_dir"
-unzip dscapt-1.2.3-linux-amd64.zip -d "$install_dir"
+unzip dscpm-1.2.3-linux-amd64.zip -d "$install_dir"
 export PATH="$install_dir:$PATH"
-dscapt --version
+dscpm --version
 ```
 
 Persist the `PATH` addition in your shell configuration as needed. Changing APT
@@ -236,15 +275,15 @@ Local builds also retain the source version.
 
 ## Build and check
 
-Run from `resources/apt`:
+Run from `resources/package-management`:
 
 ```sh
 gofmt -w ./cmd ./internal
 go vet ./...
 go test ./...
 go test -race ./...
-GOOS=linux GOARCH=amd64 go build ./cmd/dscapt
-GOOS=linux GOARCH=arm64 go build ./cmd/dscapt
+GOOS=linux GOARCH=amd64 go build -o dscpm ./cmd/dscpm
+GOOS=linux GOARCH=arm64 go build -o dscpm ./cmd/dscpm
 ```
 
 Tests use `NewStore(t.TempDir())` with a complete temporary filesystem layout;
@@ -260,7 +299,7 @@ Both were captured on October 12, 2026. Other cases use synthetic public test
 keys. The suite checks file bytes, identity, permissions, modification times,
 and directory contents to detect unwanted writes after round trips or Set.
 
-When `dsc` is on `PATH`, `go test ./...` also runs the manifest's `stateAndDiff`
-contract through the real DSC executable. The integration test redirects the
+When `dsc` is on `PATH`, `go test ./...` also runs both manifests' `stateAndDiff`
+contracts through the real DSC executable. The integration test redirects each
 manifest's test command to a test-process helper using a temporary APT root;
 it does not read or change the host's repositories. It skips when DSC is absent.

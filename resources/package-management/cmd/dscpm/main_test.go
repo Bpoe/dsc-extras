@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Bpoe/dsc-extras/resources/apt/internal/apt"
+	"github.com/Bpoe/dsc-extras/resources/package-management/internal/apt"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 )
 
@@ -36,7 +36,11 @@ func makeStore(t *testing.T) apt.Store {
 func call(t *testing.T, store apt.Store, operation, input string) (int, string, string) {
 	t.Helper()
 	var stdout, stderr strings.Builder
-	code := run([]string{operation}, strings.NewReader(input), &stdout, &stderr, store)
+	args := []string{"aptRepositories", operation}
+	if strings.HasPrefix(operation, "-") {
+		args = []string{operation}
+	}
+	code := run(args, strings.NewReader(input), &stdout, &stderr, store)
 	return code, stdout.String(), stderr.String()
 }
 
@@ -44,6 +48,62 @@ func TestVersion(t *testing.T) {
 	code, stdout, stderr := call(t, makeStore(t), "--version", "not JSON")
 	if code != 0 || stdout != version+"\n" || stderr != "" {
 		t.Fatalf("--version returned (%d, %q, %q), want (0, %q, \"\")", code, stdout, stderr, version+"\n")
+	}
+}
+
+func TestDispatch(t *testing.T) {
+	for _, args := range [][]string{
+		nil, {"get"}, {"packages", "get"}, {"dnfRepositories", "get"},
+		{"aptRepositories"}, {"aptRepositories", "remove"}, {"aptRepositories", "get", "extra"},
+	} {
+		var stdout, stderr strings.Builder
+		code := run(args, strings.NewReader("{}"), &stdout, &stderr, makeStore(t))
+		if code == 0 || stdout.Len() != 0 || !json.Valid([]byte(stderr.String())) {
+			t.Fatalf("run(%v) = (%d, %q, %q), want JSON error only", args, code, stdout.String(), stderr.String())
+		}
+	}
+	for _, flag := range []string{"--help", "-h"} {
+		code, stdout, stderr := call(t, makeStore(t), flag, "not JSON")
+		if code != 0 || stderr != "" || !strings.Contains(stdout, "dscpm") ||
+			!strings.Contains(stdout, "aptRepositories") {
+			t.Fatalf("%s = (%d, %q, %q)", flag, code, stdout, stderr)
+		}
+	}
+}
+
+func TestManifestsShareImplementation(t *testing.T) {
+	var manifests []map[string]any
+	for _, name := range []string{"aptRepositories", "dscapt"} {
+		data, err := os.ReadFile(filepath.Join("..", "..", "manifests", name+".dsc.resource.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var manifest map[string]any
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		for _, operation := range []string{"get", "test", "set"} {
+			command := manifest[operation].(map[string]any)
+			if command["executable"] != "dscpm" || command["input"] != "stdin" ||
+				!reflect.DeepEqual(command["args"], []any{"aptRepositories", operation}) {
+				t.Fatalf("%s %s does not invoke the shared handler: %v", name, operation, command)
+			}
+		}
+		if manifest["test"].(map[string]any)["return"] != "stateAndDiff" ||
+			manifest["set"].(map[string]any)["return"] != "state" ||
+			manifest["set"].(map[string]any)["implementsPretest"] != true {
+			t.Fatalf("%s changed DSC operation contracts", name)
+		}
+		manifests = append(manifests, manifest)
+	}
+	if manifests[0]["type"] != "DscExtras.PackageManagement/aptRepositories" ||
+		manifests[1]["type"] != "DscExtras.Apt/Repository" {
+		t.Fatal("unexpected resource types")
+	}
+	delete(manifests[0], "type")
+	delete(manifests[1], "type")
+	if !reflect.DeepEqual(manifests[0], manifests[1]) {
+		t.Fatal("new and compatibility manifests differ beyond resource type")
 	}
 }
 
