@@ -304,7 +304,10 @@ func TestPackagesSetRemoveOnlyActive(t *testing.T) {
 	steps := append(architectureSteps(),
 		packageQuery("bash", "bash\tinstall ok half-configured\t1\tamd64\n"),
 		packageQuery("zsh", "zsh\tdeinstall ok config-files\t2\tamd64\n"),
-		packageStep{program: "apt-get", args: []string{"-o", "Dpkg::Use-Pty=0", "-o", "APT::Cmd::Pattern-Only=true", "--yes", "remove", "--", "bash:amd64"}},
+	)
+	steps = append(steps, approvedRemovalSteps("bash\tinstall ok half-configured\t1\tamd64\nzsh\tdeinstall ok config-files\t2\tamd64\n",
+		"", removalOutput("bash"), removalOutput("bash"), "bash:amd64")...)
+	steps = append(steps,
 		packageMissing("bash"),
 		packageQuery("zsh", "zsh\tdeinstall ok config-files\t2\tamd64\n"),
 	)
@@ -538,7 +541,10 @@ func TestPackagesForeignSelectorAndAbsentAll(t *testing.T) {
 	desired.Ensure = "Absent"
 	steps = append(architectureSteps(),
 		packageQuery("bash", packageInstalled("bash", "1", "all")),
-		packageStep{program: "apt-get", args: []string{"-o", "Dpkg::Use-Pty=0", "-o", "APT::Cmd::Pattern-Only=true", "--yes", "remove", "--", "bash:all"}},
+	)
+	steps = append(steps, approvedRemovalSteps(packageInstalled("bash", "1", "all"),
+		"", removalOutput("bash"), removalOutput("bash"), "bash:all")...)
+	steps = append(steps,
 		packageMissing("bash"))
 	if _, err := packageManagerFixture(t, steps...).Set(context.Background(), desired); err != nil {
 		t.Fatal(err)

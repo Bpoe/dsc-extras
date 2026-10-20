@@ -451,7 +451,10 @@ func (m *PackageManager) Set(ctx context.Context, desired Packages) (Packages, e
 	// Disable APT's legacy regex fallback for literal names containing dots/pluses.
 	args := []string{"-o", "Dpkg::Use-Pty=0", "-o", "APT::Cmd::Pattern-Only=true", "--yes"}
 	if desired.Ensure == "Absent" {
-		args = append(args, "remove")
+		if err := m.validateRemoval(ctx, arguments, before.Packages); err != nil {
+			return before, err
+		}
+		args = removalArguments(false, true, arguments)
 	} else {
 		args = append(args, "--no-remove")
 		if desired.AllowDowngrade {
@@ -459,8 +462,10 @@ func (m *PackageManager) Set(ctx context.Context, desired Packages) (Packages, e
 		}
 		args = append(args, "install")
 	}
-	args = append(args, "--")
-	args = append(args, arguments...)
+	if desired.Ensure != "Absent" {
+		args = append(args, "--")
+		args = append(args, arguments...)
+	}
 	if _, err := m.run(ctx, "apt-get", args...); err != nil {
 		return before, err
 	}

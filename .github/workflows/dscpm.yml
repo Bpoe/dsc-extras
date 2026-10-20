@@ -88,6 +88,24 @@ jobs:
       - name: Race test
         run: go test -race ./...
 
+  apt-container:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: resources/package-management
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: resources/package-management/go.mod
+          cache-dependency-path: resources/package-management/go.mod
+      - name: Test real APT in disposable Debian container
+        env:
+          DSCPM_APT_CONTAINER: "1"
+        run: |
+          docker info > /dev/null
+          go test -v -count=1 ./internal/apt -run '^TestPackagesContainerRemoval$'
+
   build:
     needs: test
     runs-on: ubuntu-latest

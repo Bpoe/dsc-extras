@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -62,12 +63,51 @@ func (e dscPackageExecutor) Execute(ctx context.Context, program string, args, e
 			return output, nil, err
 		}
 	case "dpkg-query":
+		if len(args) == 2 && args[0] == "--show" {
+			var inventory []byte
+			names := make([]string, 0, len(state))
+			for name := range state {
+				names = append(names, name)
+			}
+			slices.Sort(names)
+			for _, name := range names {
+				inventory = fmt.Appendf(inventory, "%s\tinstall ok installed\t%s\tamd64\n", name, state[name])
+			}
+			return inventory, nil, nil
+		}
 		name := args[len(args)-1]
 		if version, ok := state[name]; ok {
 			return fmt.Appendf(nil, "%s\tinstall ok installed\t%s\tamd64\n", name, version), nil, nil
 		}
 		return nil, []byte("dpkg-query: no packages found matching " + name + "\n"), missingPackageError{}
+	case "apt-mark":
+		if slices.Equal(args, []string{"showauto"}) {
+			return nil, nil, nil
+		}
+	case "apt-config":
+		if slices.Equal(args, []string{"dump"}) {
+			return []byte("APT::Get::Purge \"false\";\n"), nil, nil
+		}
 	case "apt-get":
+		if slices.Contains(args, "--simulate") {
+			var operations []byte
+			count := 0
+			for index, arg := range args {
+				if arg != "--" {
+					continue
+				}
+				for _, target := range args[index+1:] {
+					name, _, _ := strings.Cut(target, ":")
+					if version, ok := state[name]; ok {
+						operations = fmt.Appendf(operations, "Remv %s [%s]\n", target, version)
+						count++
+					}
+				}
+				break
+			}
+			output := fmt.Appendf(nil, "0 upgraded, 0 newly installed, %d to remove and 0 not upgraded.\n", count)
+			return append(output, operations...), nil, nil
+		}
 		log, err := os.OpenFile(filepath.Join(e.root, "transactions"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
 			return nil, nil, err
@@ -114,6 +154,43 @@ func (e dscPackageExecutor) Execute(ctx context.Context, program string, args, e
 		return nil, nil, os.WriteFile(statePath, data, 0600)
 	}
 	return nil, nil, fmt.Errorf("unexpected fake command: %s %q", program, args)
+}
+
+func TestDSCPackageExecutorRemoval(t *testing.T) {
+	root := t.TempDir()
+	statePath := filepath.Join(root, "installed.json")
+	if err := os.WriteFile(statePath, []byte(`{"git":"1.0","vim":"2.0"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manager := newDSCPackageManager(root)
+	desired := apt.Packages{
+		Name:   apt.PackageNames{Values: []string{"git"}, Scalar: true},
+		Ensure: "Absent",
+	}
+	actual, err := manager.Set(t.Context(), desired)
+	if err != nil || actual.State != "Absent" {
+		t.Fatalf("fake removal: %+v, error %v", actual, err)
+	}
+	state, err := os.ReadFile(statePath)
+	if err != nil || string(state) != `{"vim":"2.0"}` {
+		t.Fatalf("fake removal state = %s, error %v", state, err)
+	}
+	logPath := filepath.Join(root, "transactions")
+	before, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Count(before, []byte("\n")) != 1 || bytes.Contains(before, []byte("--simulate")) ||
+		!bytes.Contains(before, []byte("--auto-remove remove -- git:amd64")) {
+		t.Fatalf("expected only final auto-removal in transaction log: %s", before)
+	}
+	if _, err := manager.Set(t.Context(), desired); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(logPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("idempotent fake removal changed transaction log: %s (%v)", after, err)
+	}
 }
 
 func TestDSCPackagesProcess(t *testing.T) {

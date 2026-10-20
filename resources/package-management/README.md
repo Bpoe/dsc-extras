@@ -282,6 +282,54 @@ One APT transaction does not guarantee rollback: an APT failure or failed
 post-operation verification may leave partial changes. The next reconciliation
 queries installed state again before planning further work.
 
+### Safe removal and automatic dependency cleanup
+
+`ensure: Absent` removes only the noncompliant, explicitly requested package
+identities, preserving architecture qualifiers. Removal is safe by default:
+before any mutation, a plain `apt-get --simulate remove` must propose **only**
+those identities. If removing `libexample` would also remove `nginx` because
+`nginx` depends on it, reconciliation fails with the unexpected package names
+and asks you to remove the dependent packages explicitly or change the
+configuration. This protects reverse-dependent packages whether they are marked
+manually **or automatically** installed. There is no force flag, dependency-removal
+override, or automatic expansion of the explicit request.
+
+This differs from cleaning up orphaned dependencies: removing `nginx` may leave
+its automatically installed `libfoo` and `libbar` unused. A second simulation
+uses APT's native `--auto-remove` dependency solver. Additional removals are
+allowed only when `apt-mark showauto` identifies them as automatically installed;
+the plain removal simulation must not have required them as reverse-dependent
+removals. A dependency still needed by another remaining package is retained by
+APT. Manually installed packages are never automatically cleaned up; they must
+be explicitly requested for removal.
+
+Once validated, the resource executes one `apt-get --yes --auto-remove remove`
+transaction, not a separate `autoremove` operation, and verifies that all
+explicitly requested packages are absent afterward. This can also clean up
+**unrelated, previously orphaned automatically installed packages**, not just
+dependencies orphaned by this removal. An entirely absent request is a strict
+no-op: no APT simulation, removal, or unrelated cleanup runs.
+Removal never requests purge; residual configuration files are retained.
+
+Planning parses actual `Remv` operations, checks identities against the dpkg
+inventory and removal counts, and rejects unknown/ambiguous identities,
+unexpected installs/upgrades/downgrades/configuration/purge operations,
+malformed output, failed commands, or unavailable automatic-package status.
+Unknown APT output formats fail closed rather than being guessed.
+Both removal plans are repeated, and the complete dpkg inventory, automatic
+marks, and effective APT configuration are rechecked before execution.
+Detectable changes abort reconciliation without executing the removal.
+
+**Concurrency limitation:** APT simulations do not acquire an exclusive APT
+lock. These rechecks are not an atomic reservation of a plan: another package
+manager, repository metadata change, or configuration writer can still change
+state after a check and before the real APT solver acquires its locks.
+Serialize external package/repository maintenance with dscd reconciliation;
+do not rely on simulations for atomic protection against concurrent writers.
+Package removal and dependency cleanup are not guaranteed transactional or
+reversible: maintainer scripts or a failed APT transaction may leave partial
+changes, and there is no rollback or configuration-file purge.
+
 ### Observed package state
 
 The read-only `state` property summarizes installation across the request:
