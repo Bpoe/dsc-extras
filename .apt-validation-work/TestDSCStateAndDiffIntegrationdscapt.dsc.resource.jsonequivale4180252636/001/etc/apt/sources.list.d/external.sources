@@ -1,0 +1,7 @@
+Types: deb
+URIs: https://packages.example.org/debian/
+Suites: stable
+Components: contrib main
+Architectures: arm64 amd64
+Signed-By: /usr/share/keyrings/external.gpg
+Enabled: yes

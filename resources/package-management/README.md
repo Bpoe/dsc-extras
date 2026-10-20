@@ -555,3 +555,19 @@ exercise read-only Get/Test through real dpkg tools, including local metadata
 resolution and missing-package detection. They skip when the required tools or
 the installed `bash` fixture are unavailable; they never run native Set or APT
 transactions and do not modify host packages.
+
+Opt in to real APT removal tests from `resources/package-management`:
+
+```sh
+DSCPM_APT_CONTAINER=1 go test -v -count=1 ./internal/apt -run '^TestPackagesContainerRemoval$'
+```
+
+`TestPackagesContainerRemoval` requires a working Docker or Podman runtime and
+fails if explicitly enabled without one. Otherwise it skips by default. It
+creates a disposable `debian:bookworm-slim` container with `--rm`, no host mounts,
+and networking disabled (the runtime may first download the image). Synthetic
+packages and all real `PackageManager.Set` transactions stay inside that
+container, which is forcibly removed during test cleanup. Coverage includes
+manual and automatic reverse-dependent rejection, orphan dependency cleanup,
+shared/manual dependency retention, preserved conffiles, and idempotent absence.
+The `apt-container` CI job enables this test; it never mutates host packages.

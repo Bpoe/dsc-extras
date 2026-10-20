@@ -145,6 +145,7 @@ func parseRemoval(output []byte, state removalSnapshot) (map[string]bool, error)
 			strings.HasPrefix(line, "Building dependency tree...") ||
 			strings.HasPrefix(line, "Reading state information...") ||
 			line == "The following packages will be REMOVED:" ||
+			line == "The following package was automatically installed and is no longer required:" ||
 			line == "The following packages were automatically installed and are no longer required:" ||
 			line == "Use 'apt autoremove' to remove them." ||
 			strings.HasPrefix(line, "  ") {

@@ -277,6 +277,21 @@ func TestRemovalCleanupSimulationFailure(t *testing.T) {
 	}
 }
 
+func TestRemovalNativeAutomaticPackageNotices(t *testing.T) {
+	state := removalSnapshot{
+		active: map[string]PackageState{"nginx:amd64": {Name: "nginx", Architecture: "amd64", Version: "1"}},
+	}
+	for _, notice := range []string{
+		"The following package was automatically installed and is no longer required:",
+		"The following packages were automatically installed and are no longer required:",
+	} {
+		output := notice + "\n  old-orphan\nUse 'apt autoremove' to remove them.\n" + removalOutput("nginx")
+		if _, err := parseRemoval([]byte(output), state); err != nil {
+			t.Fatalf("rejected native automatic-package notice: %v", err)
+		}
+	}
+}
+
 func TestRemovalDetectsChangeBeforePlanning(t *testing.T) {
 	steps := removalStateSteps(packageInstalled("nginx", "2", "amd64"), "")
 	before := []PackageState{{Name: "nginx", Architecture: "amd64", Status: "install ok installed", Version: "1"}}

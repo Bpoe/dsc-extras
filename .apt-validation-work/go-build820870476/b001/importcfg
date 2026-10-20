@@ -1,0 +1,8 @@
+# import config
+packagefile os=/home/runner/.cache/go-build/3c/3c8b4337aae4214cb3472003e3419f575b704a2c85779cd8b1f4ade33c12482d-d
+packagefile reflect=/home/runner/.cache/go-build/26/26bdf03ecdf95966fa8f6bc7bc6dac4609912f4412ed48a9395bf31079a1844c-d
+packagefile testing=/home/runner/.cache/go-build/7b/7b1d1f1c137620493ece48d2e7107ebb7fafdc85f15087f007ff2c965ea00b58-d
+packagefile testing/internal/testdeps=/home/runner/.cache/go-build/8b/8bea2851b739dabf925770511075d1ae82512f3c71b30bbe805eec4df1e03913-d
+packagefile runtime=/home/runner/.cache/go-build/69/6991d3b8fbf5b7bab54f383d1ea5c9c11a136b8b0b2d75c32930d4e13fad70e3-d
+packagefile runtime/race=/home/runner/.cache/go-build/23/2333d7d834de9d6ff167da088c8f8030cee0ede2641e0c404fc4cac7213d5594-d
+packagefile github.com/Bpoe/dsc-extras/resources/package-management/cmd/dscpm=/home/runner/work/dsc-extras/dsc-extras/.apt-validation-work/go-build820870476/b126/_pkg_.a

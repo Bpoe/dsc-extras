@@ -1,0 +1,81 @@
+{
+  "$schema": "https://aka.ms/dsc/schemas/v3/bundled/resource/manifest.json",
+  "type": "Microsoft.DSC/Assertion",
+  "version": "0.1.0",
+  "description": "`test` will be invoked for all resources in the supplied configuration.",
+  "kind": "group",
+  "get": {
+    "executable": "dsc",
+    "args": [
+      "--trace-format",
+      "pass-through",
+      "config",
+      "--as-group",
+      "--as-assert",
+      "test",
+      "--as-get",
+      {
+        "jsonInputArg": "--input",
+        "mandatory": true
+      }
+    ]
+  },
+  "set": {
+    "executable": "dsc",
+    "args": [
+      "--trace-format",
+      "pass-through",
+      "config",
+      "--as-group",
+      "--as-assert",
+      "test",
+      {
+        "jsonInputArg": "--input",
+        "mandatory": true
+      }
+    ],
+    "implementsPretest": true,
+    "return": "state"
+  },
+  "test": {
+    "executable": "dsc",
+    "args": [
+      "--trace-format",
+      "pass-through",
+      "config",
+      "--as-group",
+      "--as-assert",
+      "test",
+      "--as-config",
+      {
+        "jsonInputArg": "--input",
+        "mandatory": true
+      }
+    ],
+    "return": "state"
+  },
+  "exitCodes": {
+    "0": "Success",
+    "1": "Invalid argument",
+    "2": "Resource error",
+    "3": "JSON Serialization error",
+    "4": "Invalid input format",
+    "5": "Resource instance failed schema validation",
+    "6": "Command cancelled",
+    "7": "Resource not found",
+    "8": "Assertion failed"
+  },
+  "validate": {
+    "executable": "dsc",
+    "args": [
+      "--trace-format",
+      "pass-through",
+      "config",
+      "validate",
+      {
+        "jsonInputArg": "--input",
+        "mandatory": true
+      }
+    ]
+  }
+}

@@ -57,7 +57,7 @@ func TestPackagesContainerRemoval(t *testing.T) {
 		}
 	}
 	if tool == "" {
-		t.Skip("neither Docker nor Podman has an available container runtime")
+		t.Fatal("DSCPM_APT_CONTAINER=1 requires an available Docker or Podman container runtime")
 	}
 	name := fmt.Sprintf("dscpm-apt-test-%d-%d", os.Getpid(), time.Now().UnixNano())
 	t.Cleanup(func() {

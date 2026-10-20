@@ -1,0 +1,77 @@
+{
+  "$schema": "https://aka.ms/dsc/schemas/v3/bundled/resource/manifest.json",
+  "type": "Microsoft.DSC/Include",
+  "version": "0.1.0",
+  "description": "Allows including a configuration file with optional parameter file.",
+  "kind": "importer",
+  "get": {
+    "executable": "dsc",
+    "args": [
+      "--trace-format",
+      "pass-through",
+      "config",
+      "--as-include",
+      "--as-group",
+      "get",
+      {
+        "jsonInputArg": "--input",
+        "mandatory": true
+      }
+    ]
+  },
+  "set": {
+    "executable": "dsc",
+    "args": [
+      "--trace-format",
+      "pass-through",
+      "config",
+      "--as-include",
+      "--as-group",
+      "set",
+      {
+        "jsonInputArg": "--input",
+        "mandatory": true
+      }
+    ],
+    "implementsPretest": true,
+    "return": "state"
+  },
+  "test": {
+    "executable": "dsc",
+    "args": [
+      "--trace-format",
+      "pass-through",
+      "config",
+      "--as-include",
+      "--as-group",
+      "test",
+      {
+        "jsonInputArg": "--input",
+        "mandatory": true
+      }
+    ]
+  },
+  "exitCodes": {
+    "0": "Success",
+    "1": "Invalid argument",
+    "2": "Resource error",
+    "3": "JSON Serialization error",
+    "4": "Invalid input format",
+    "5": "Resource instance failed schema validation",
+    "6": "Command cancelled"
+  },
+  "validate": {
+    "executable": "dsc",
+    "args": [
+      "--trace-format",
+      "pass-through",
+      "config",
+      "--as-include",
+      "validate",
+      {
+        "jsonInputArg": "--input",
+        "mandatory": true
+      }
+    ]
+  }
+}
