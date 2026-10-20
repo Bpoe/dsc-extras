@@ -9,11 +9,11 @@ directory and can be built, tested, and released independently.
 - [Package management component (`dscpm`)](resources/package-management/README.md)
   provides `DscExtras.PackageManagement/aptRepositories` to manage APT
   repositories and `DscExtras.PackageManagement/packages` to manage repository
-  packages and local Debian archives in batched APT transactions. The
+  packages and local archives in batched APT or DNF installation transactions. The
   compatibility manifest preserves
   `DscExtras.Apt/Repository` for existing DSC configurations; direct `dscapt`
-  CLI users must migrate to `dscpm aptRepositories`. DNF repositories and
-  DNF/RPM packages remain future scope.
+  CLI users must migrate to `dscpm aptRepositories`. RHEL/Rocky/AlmaLinux 8, 9,
+  and 10 use DNF/RPM; DNF repositories and DNF removal remain future scope.
 - [Azure Key Vault secret extension (`dsckvsec`)](extensions/azure-keyvault/README.md)
   retrieves Azure Key Vault secrets for DSC's `secret()` configuration function.
 

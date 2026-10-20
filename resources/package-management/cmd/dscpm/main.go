@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/apt"
+	"github.com/Bpoe/dsc-extras/resources/package-management/internal/packages"
 )
 
 const maxInputBytes = 1 << 20
@@ -27,16 +28,16 @@ type testResult struct {
 func main() {
 	store := apt.NewStore("")
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := runWithPackages(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, store, apt.NewPackageManager(nil))
+	code := runWithPackages(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, store, nil)
 	stop()
 	os.Exit(code)
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, store apt.Store) int {
-	return runWithPackages(context.Background(), args, stdin, stdout, stderr, store, apt.NewPackageManager(nil))
+	return runWithPackages(context.Background(), args, stdin, stdout, stderr, store, nil)
 }
 
-func runWithPackages(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, store apt.Store, packages *apt.PackageManager) int {
+func runWithPackages(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, store apt.Store, packages packages.Manager) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		_, _ = fmt.Fprintln(stdout, "Usage: dscpm <resource> <get|set|test>\nResources: aptRepositories, packages")
 		return 0

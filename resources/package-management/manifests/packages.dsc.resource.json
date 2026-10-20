@@ -2,7 +2,7 @@
   "$schema": "https://aka.ms/dsc/schemas/v3.1/bundled/resource/manifest.json",
   "type": "DscExtras.PackageManagement/packages",
   "version": "0.1.0",
-  "description": "Manage repository packages and local Debian archives in native APT transactions",
+  "description": "Manage packages using native APT/dpkg or install packages using DNF/RPM",
   "kind": "resource",
   "get": {
     "executable": "dscpm",
@@ -25,12 +25,12 @@
   "schema": {
     "embedded": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "APT packages",
+      "title": "Packages",
       "type": "object",
       "required": ["name"],
       "properties": {
         "name": {
-          "description": "Repository package name or accessible local .deb path; arrays are unordered sets.",
+          "description": "Repository package name or accessible local .deb (APT) or .rpm (DNF) path; arrays are unordered sets. Use name:architecture to qualify a repository package.",
           "oneOf": [
             {"type": "string", "minLength": 1},
             {
@@ -48,7 +48,7 @@
           "default": "Present"
         },
         "version": {
-          "description": "Exact Debian version, only for a single repository package desired Present.",
+          "description": "Exact Debian version or RPM [epoch:]version-release, only for a single repository package desired Present.",
           "type": "string",
           "minLength": 1
         },
@@ -85,7 +85,7 @@
           "if": {"required": ["version"]},
           "then": {
             "properties": {
-              "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+(:[a-z0-9][a-z0-9-]*)?$"},
+              "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9+._-]*(:[A-Za-z0-9][A-Za-z0-9_-]*)?$"},
               "ensure": {"const": "Present"}
             }
           }

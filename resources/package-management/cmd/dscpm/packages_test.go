@@ -7,7 +7,37 @@ import (
 	"testing"
 
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/apt"
+	"github.com/Bpoe/dsc-extras/resources/package-management/internal/dnf"
 )
+
+func TestPackageBackendSelection(t *testing.T) {
+	for _, family := range []string{"apt", "dnf", "unsupported"} {
+		manager, err := packageBackend(func() (string, error) { return family, nil })
+		switch family {
+		case "apt":
+			if _, ok := manager.(*apt.PackageManager); !ok || err != nil {
+				t.Fatalf("APT dispatch: %T, %v", manager, err)
+			}
+		case "dnf":
+			if _, ok := manager.(*dnf.PackageManager); !ok || err != nil {
+				t.Fatalf("DNF dispatch: %T, %v", manager, err)
+			}
+		default:
+			if err == nil {
+				t.Fatal("unsupported backend accepted")
+			}
+		}
+	}
+}
+
+func TestDNFPackagesPreservesExitCode(t *testing.T) {
+	var stdout, stderr strings.Builder
+	code := runPackages(t.Context(), []string{"set"}, strings.NewReader(`{"name":"git"}`), &stdout, &stderr,
+		dnf.NewPackageManager(failedPackageExecutor{packageExitError(200)}))
+	if code != 200 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "lock unavailable") {
+		t.Fatalf("DNF error: %d, %s, %s", code, stdout.String(), stderr.String())
+	}
+}
 
 type failedPackageExecutor struct{ err error }
 
