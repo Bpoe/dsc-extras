@@ -1,0 +1,198 @@
+name: dscpm
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/dscpm.yml"
+      - ".github/tests/test_dscpm_release.py"
+      - "resources/package-management/**"
+  push:
+    branches:
+      - "**"
+    tags:
+      - "dscpm-v*"
+    paths:
+      - ".github/workflows/dscpm.yml"
+      - ".github/tests/test_dscpm_release.py"
+      - "resources/package-management/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DSCPM_REQUIRE_DSC: "1"
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    defaults:
+      run:
+        working-directory: resources/package-management
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve version
+        id: version
+        run: |
+          version=$(jq -er '.version | select(type == "string")' manifests/aptRepositories.dsc.resource.json)
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/dscpm-v* ]]; then
+            version="${GITHUB_REF#refs/tags/dscpm-v}"
+          fi
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Expected a stable X.Y.Z version; release tags must use dscpm-vX.Y.Z."
+            exit 1
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Verify release commit is on main
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/dscpm-v')
+        run: |
+          fetch_args=(--no-tags)
+          if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then
+            fetch_args+=(--unshallow)
+          fi
+          git fetch "${fetch_args[@]}" origin '+refs/heads/main:refs/remotes/origin/main'
+          if ! tag_commit=$(git rev-parse --verify "${GITHUB_REF}^{commit}"); then
+            echo "::error::Release tag ${GITHUB_REF_NAME} does not resolve to a commit."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
+            echo "::error::Release tag ${GITHUB_REF_NAME} points to ${tag_commit}, which is not reachable from origin/main. Merge the commit into main before tagging a release."
+            exit 1
+          fi
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: resources/package-management/go.mod
+          cache-dependency-path: resources/package-management/go.mod
+      - name: Install DSC
+        run: |
+          dsc_dir="$RUNNER_TEMP/dsc-3.3.0"
+          mkdir -p "$dsc_dir"
+          curl --fail --silent --show-error --location \
+            https://github.com/PowerShell/DSC/releases/download/v3.3.0/DSC-3.3.0-x86_64-linux.tar.gz \
+            --output "$dsc_dir/dsc.tar.gz"
+          echo "cf17d1a130b65332ec65380ee9368133101d13d8f40c1a501038920b1e9cd748  $dsc_dir/dsc.tar.gz" | sha256sum --check
+          tar -xzf "$dsc_dir/dsc.tar.gz" -C "$dsc_dir"
+          test "$("$dsc_dir/dsc" --version)" = "dsc 3.3.0"
+          echo "$dsc_dir" >> "$GITHUB_PATH"
+      - name: Test release safeguards
+        run: |
+          python3 -m pip install --disable-pip-version-check --target "$RUNNER_TEMP/dscpm-release-test-deps" PyYAML==6.0.3
+          PYTHONPATH="$RUNNER_TEMP/dscpm-release-test-deps" python3 ../../.github/tests/test_dscpm_release.py
+      - name: Verify formatting
+        run: test -z "$(gofmt -l ./cmd ./internal)"
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+      - name: Race test
+        run: go test -race ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    defaults:
+      run:
+        working-directory: resources/package-management
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: resources/package-management/go.mod
+          cache-dependency-path: resources/package-management/go.mod
+      - name: Build and package
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          package_dir="dist/linux-${GOARCH}"
+          mkdir -p "$package_dir"
+          go build -trimpath -ldflags "-X main.version=${VERSION}" -o "$package_dir/dscpm" ./cmd/dscpm
+          for manifest in aptRepositories.dsc.resource.json dscapt.dsc.resource.json; do
+            jq --arg version "$VERSION" '.version = $version' "manifests/$manifest" > "$package_dir/$manifest"
+          done
+          cp ../../LICENSE "$package_dir/"
+          chmod 755 "$package_dir/dscpm"
+          (
+            cd "$package_dir"
+            zip -X "../dscpm-${VERSION}-linux-${GOARCH}.zip" dscpm aptRepositories.dsc.resource.json dscapt.dsc.resource.json LICENSE
+          )
+      - name: Verify package
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          archive="dist/dscpm-${VERSION}-linux-${GOARCH}.zip"
+          check_dir="dist/check-${GOARCH}"
+          unzip -t "$archive"
+          test "$(unzip -Z1 "$archive" | LC_ALL=C sort)" = "$(printf '%s\n' LICENSE aptRepositories.dsc.resource.json dscapt.dsc.resource.json dscpm | LC_ALL=C sort)"
+          unzip -q "$archive" -d "$check_dir"
+          test -x "$check_dir/dscpm"
+          for manifest in aptRepositories.dsc.resource.json dscapt.dsc.resource.json; do
+            test "$(jq -r '.version' "$check_dir/$manifest")" = "$VERSION"
+            jq -e '
+              . as $manifest | ["get", "test", "set"] | all(
+                . as $operation | $manifest[$operation] |
+                .executable == "dscpm" and .args == ["aptRepositories", $operation]
+              )
+            ' "$check_dir/$manifest" > /dev/null
+          done
+          test "$(jq -r '.type' "$check_dir/aptRepositories.dsc.resource.json")" = "DscExtras.PackageManagement/aptRepositories"
+          test "$(jq -r '.type' "$check_dir/dscapt.dsc.resource.json")" = "DscExtras.Apt/Repository"
+          build_info=$(go version -m "$check_dir/dscpm")
+          grep -Fq 'GOOS=linux' <<< "$build_info"
+          grep -Fq "GOARCH=${GOARCH}" <<< "$build_info"
+          grep -Fq 'CGO_ENABLED=0' <<< "$build_info"
+          if [[ "$GOARCH" == amd64 ]]; then
+            test "$("$check_dir/dscpm" --version)" = "$VERSION"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dscpm-linux-${{ matrix.goarch }}
+          path: resources/package-management/dist/dscpm-${{ needs.test.outputs.version }}-linux-${{ matrix.goarch }}.zip
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/dscpm-v')
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: dscpm-release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dscpm-linux-*
+          path: dist
+          merge-multiple: true
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          assets=("dist/dscpm-${VERSION}-linux-amd64.zip" "dist/dscpm-${VERSION}-linux-arm64.zip")
+          for asset in "${assets[@]}"; do
+            if [[ ! -s "$asset" ]]; then
+              echo "::error::Missing release asset: $asset"
+              exit 1
+            fi
+          done
+          existing_tags=$(gh api --paginate "repos/${GH_REPO}/releases" --jq '.[].tag_name')
+          if grep -Fxq -- "$GITHUB_REF_NAME" <<< "$existing_tags"; then
+            echo "::error::A release or draft for ${GITHUB_REF_NAME} already exists; refusing to overwrite it."
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --draft \
+            --verify-tag \
+            --title "dscpm ${VERSION}" \
+            --notes "Linux AMD64 and ARM64 ZIPs for dscpm ${VERSION}. Each ZIP contains dscpm, aptRepositories.dsc.resource.json, dscapt.dsc.resource.json, and LICENSE."

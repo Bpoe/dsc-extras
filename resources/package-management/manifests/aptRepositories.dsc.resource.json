@@ -1,24 +1,24 @@
 {
   "$schema": "https://aka.ms/dsc/schemas/v3.1/bundled/resource/manifest.json",
-  "type": "DscExtras.Apt/Repository",
+  "type": "DscExtras.PackageManagement/aptRepositories",
   "version": "0.1.0",
   "description": "Manage logical APT repository state while preserving existing source and keyring formats",
   "kind": "resource",
   "get": {
-    "executable": "dscapt",
-    "args": ["get"],
+    "executable": "dscpm",
+    "args": ["aptRepositories", "get"],
     "input": "stdin"
   },
   "set": {
-    "executable": "dscapt",
-    "args": ["set"],
+    "executable": "dscpm",
+    "args": ["aptRepositories", "set"],
     "input": "stdin",
     "implementsPretest": true,
     "return": "state"
   },
   "test": {
-    "executable": "dscapt",
-    "args": ["test"],
+    "executable": "dscpm",
+    "args": ["aptRepositories", "test"],
     "input": "stdin",
     "return": "stateAndDiff"
   },

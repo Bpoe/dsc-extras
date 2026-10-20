@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Bpoe/dsc-extras/resources/apt/internal/apt"
+	"github.com/Bpoe/dsc-extras/resources/package-management/internal/apt"
 )
 
 const maxInputBytes = 1 << 20
@@ -28,13 +28,29 @@ func main() {
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, store apt.Store) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		_, _ = fmt.Fprintln(stdout, "Usage: dscapt <get|set|test>")
+		_, _ = fmt.Fprintln(stdout, "Usage: dscpm <resource> <get|set|test>\nResources: aptRepositories")
 		return 0
 	}
 	if len(args) == 1 && args[0] == "--version" {
 		_, _ = fmt.Fprintln(stdout, version)
 		return 0
 	}
+	handlers := map[string]func([]string, io.Reader, io.Writer, io.Writer) int{
+		"aptRepositories": func(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+			return runAPTRepositories(args, stdin, stdout, stderr, store)
+		},
+	}
+	if len(args) == 0 {
+		return reportError(stderr, "expected a resource type and operation")
+	}
+	handler, ok := handlers[args[0]]
+	if !ok {
+		return reportError(stderr, "unknown resource type")
+	}
+	return handler(args[1:], stdin, stdout, stderr)
+}
+
+func runAPTRepositories(args []string, stdin io.Reader, stdout, stderr io.Writer, store apt.Store) int {
 	if len(args) != 1 {
 		return reportError(stderr, "expected one operation: get, set, or test")
 	}
