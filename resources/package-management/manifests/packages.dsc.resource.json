@@ -1,0 +1,113 @@
+{
+  "$schema": "https://aka.ms/dsc/schemas/v3.1/bundled/resource/manifest.json",
+  "type": "DscExtras.PackageManagement/packages",
+  "version": "0.1.0",
+  "description": "Manage repository packages and local Debian archives in native APT transactions",
+  "kind": "resource",
+  "get": {
+    "executable": "dscpm",
+    "args": ["packages", "get"],
+    "input": "stdin"
+  },
+  "test": {
+    "executable": "dscpm",
+    "args": ["packages", "test"],
+    "input": "stdin",
+    "return": "stateAndDiff"
+  },
+  "set": {
+    "executable": "dscpm",
+    "args": ["packages", "set"],
+    "input": "stdin",
+    "implementsPretest": true,
+    "return": "state"
+  },
+  "schema": {
+    "embedded": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "APT packages",
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "description": "Repository package name or accessible local .deb path; arrays are unordered sets.",
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            }
+          ],
+          "x-dsc-key": true
+        },
+        "ensure": {
+          "type": "string",
+          "enum": ["Present", "Absent"],
+          "default": "Present"
+        },
+        "version": {
+          "description": "Exact Debian version, only for a single repository package desired Present.",
+          "type": "string",
+          "minLength": 1
+        },
+        "allowDowngrade": {"type": "boolean", "default": false},
+        "updateCache": {"type": "boolean", "default": false},
+        "state": {
+          "description": "Observed aggregate; Mixed includes partially installed groups. ensure remains the requested intent.",
+          "type": "string",
+          "enum": ["Present", "Absent", "Mixed"],
+          "readOnly": true
+        },
+        "packages": {
+          "description": "Observed individual states, sorted by requested name.",
+          "type": "array",
+          "readOnly": true,
+          "items": {
+            "type": "object",
+            "required": ["requestedName", "name", "installed", "status"],
+            "properties": {
+              "requestedName": {"type": "string"},
+              "name": {"type": "string"},
+              "installed": {"type": "boolean"},
+              "status": {"type": "string"},
+              "version": {"type": "string"},
+              "architecture": {"type": "string"}
+            },
+            "additionalProperties": false
+          }
+        },
+        "_inDesiredState": {"type": ["boolean", "null"], "readOnly": true}
+      },
+      "allOf": [
+        {
+          "if": {"required": ["version"]},
+          "then": {
+            "properties": {
+              "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+(:[a-z0-9][a-z0-9-]*)?$"},
+              "ensure": {"const": "Present"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"ensure": {"const": "Absent"}}, "required": ["ensure"]},
+          "then": {
+            "properties": {
+              "allowDowngrade": {"const": false},
+              "updateCache": {"const": false},
+              "name": {
+                "oneOf": [
+                  {"type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+(:[a-z0-9][a-z0-9-]*)?$"},
+                  {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+(:[a-z0-9][a-z0-9-]*)?$"}}
+                ]
+              }
+            },
+            "not": {"required": ["version"]}
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  }
+}

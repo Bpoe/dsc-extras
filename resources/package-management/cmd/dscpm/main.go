@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/apt"
 )
@@ -23,12 +26,19 @@ type testResult struct {
 
 func main() {
 	store := apt.NewStore("")
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, store))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := runWithPackages(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, store, apt.NewPackageManager(nil))
+	stop()
+	os.Exit(code)
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, store apt.Store) int {
+	return runWithPackages(context.Background(), args, stdin, stdout, stderr, store, apt.NewPackageManager(nil))
+}
+
+func runWithPackages(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, store apt.Store, packages *apt.PackageManager) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		_, _ = fmt.Fprintln(stdout, "Usage: dscpm <resource> <get|set|test>\nResources: aptRepositories")
+		_, _ = fmt.Fprintln(stdout, "Usage: dscpm <resource> <get|set|test>\nResources: aptRepositories, packages")
 		return 0
 	}
 	if len(args) == 1 && args[0] == "--version" {
@@ -38,6 +48,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, store apt.Sto
 	handlers := map[string]func([]string, io.Reader, io.Writer, io.Writer) int{
 		"aptRepositories": func(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			return runAPTRepositories(args, stdin, stdout, stderr, store)
+		},
+		"packages": func(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+			return runPackages(ctx, args, stdin, stdout, stderr, packages)
 		},
 	}
 	if len(args) == 0 {

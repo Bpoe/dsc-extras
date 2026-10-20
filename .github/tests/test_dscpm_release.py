@@ -15,6 +15,7 @@ MODULE = REPOSITORY / "resources" / "package-management"
 MANIFESTS = {
     "aptRepositories.dsc.resource.json": "DscExtras.PackageManagement/aptRepositories",
     "dscapt.dsc.resource.json": "DscExtras.Apt/Repository",
+    "packages.dsc.resource.json": "DscExtras.PackageManagement/packages",
 }
 WORKFLOW = yaml.load(
     (REPOSITORY / ".github" / "workflows" / "dscpm.yml").read_text(),
@@ -197,6 +198,9 @@ class ReleaseSafeguards(unittest.TestCase):
         self.assertLess(setup_index, test_steps.index(step("test", "Test release safeguards")))
         self.assertIn("../../.github/tests/test_dscpm_release.py",
                       step("test", "Test release safeguards")["run"])
+        self.assertEqual(step("test", "Verify formatting")["run"], 'test -z "$(gofmt -l ./cmd ./internal)"')
+        self.assertEqual(step("test", "Vet")["run"], "go vet ./...")
+        self.assertEqual(step("test", "Test")["run"], "go test ./...")
         self.assertEqual(step("test", "Race test")["run"], "go test -race ./...")
         self.assertEqual(WORKFLOW["jobs"]["test"]["env"]["DSCPM_REQUIRE_DSC"], "1")
         install = step("test", "Install DSC")
@@ -206,6 +210,7 @@ class ReleaseSafeguards(unittest.TestCase):
         self.assertLess(test_steps.index(install), test_steps.index(step("test", "Race test")))
         self.assertIn("releases/download/v3.3.0/DSC-3.3.0-x86_64-linux.tar.gz", install["run"])
         self.assertIn("sha256sum --check", install["run"])
+        self.assertIn("cf17d1a130b65332ec65380ee9368133101d13d8f40c1a501038920b1e9cd748", install["run"])
         self.assertIn('= "dsc 3.3.0"', install["run"])
         self.assertIn('>> "$GITHUB_PATH"', install["run"])
         upload = next(item for item in WORKFLOW["jobs"]["build"]["steps"]
@@ -224,9 +229,10 @@ class ReleaseSafeguards(unittest.TestCase):
             with self.subTest(manifest=filename):
                 manifest = json.loads((MODULE / "manifests" / filename).read_text())
                 self.assertEqual(manifest["type"], resource_type)
+                resource = "packages" if filename == "packages.dsc.resource.json" else "aptRepositories"
                 for operation in ("get", "test", "set"):
                     self.assertEqual(manifest[operation]["executable"], "dscpm")
-                    self.assertEqual(manifest[operation]["args"], ["aptRepositories", operation])
+                    self.assertEqual(manifest[operation]["args"], [resource, operation])
 
     def test_build_and_package_both_architectures(self):
         module = self.root / "resources" / "package-management"
@@ -252,30 +258,42 @@ class ReleaseSafeguards(unittest.TestCase):
                         manifest = json.loads(package.read(filename))
                         self.assertEqual(manifest["version"], self.env["VERSION"])
                         self.assertEqual(manifest["type"], resource_type)
+                        resource = "packages" if filename == "packages.dsc.resource.json" else "aptRepositories"
                         for operation in ("get", "test", "set"):
                             self.assertEqual(manifest[operation]["executable"], "dscpm")
-                            self.assertEqual(manifest[operation]["args"], ["aptRepositories", operation])
+                            self.assertEqual(manifest[operation]["args"], [resource, operation])
 
         archive = module / "dist" / "dscpm-1.2.3-linux-amd64.zip"
         original = archive.read_bytes()
         with zipfile.ZipFile(archive) as package:
             entries = [(info, package.read(info)) for info in package.infolist()]
-        mutations = [("extra-member", None)]
+        mutations = [("extra-member", None, None)]
         for filename in MANIFESTS:
-            mutations.extend((filename, field) for field in ("version", "type", "executable", "args"))
-        for filename, field in mutations:
-            with self.subTest(rejected_manifest=filename, rejected_field=field):
+            mutations.extend((filename, field, None) for field in ("version", "type", "missing"))
+            mutations.extend((filename, field, operation)
+                             for field in ("executable", "args", "resource", "missing-operation")
+                             for operation in ("get", "test", "set"))
+        for filename, field, operation in mutations:
+            with self.subTest(rejected_manifest=filename, rejected_field=field, operation=operation):
                 shutil.rmtree(module / "dist" / "check-amd64", ignore_errors=True)
                 with zipfile.ZipFile(archive, "w") as package:
                     for info, content in entries:
                         if info.filename == filename:
+                            if field == "missing":
+                                continue
                             manifest = json.loads(content)
                             if field in ("version", "type"):
                                 manifest[field] = "invalid"
                             elif field == "executable":
-                                manifest["get"]["executable"] = "dscapt"
+                                manifest[operation]["executable"] = "dscapt"
                             elif field == "args":
-                                manifest["set"]["args"] = ["aptRepositories", "get"]
+                                resource = "packages" if filename == "packages.dsc.resource.json" else "aptRepositories"
+                                manifest[operation]["args"] = [resource, "invalid"]
+                            elif field == "resource":
+                                resource = "aptRepositories" if filename == "packages.dsc.resource.json" else "packages"
+                                manifest[operation]["args"] = [resource, operation]
+                            elif field == "missing-operation":
+                                del manifest[operation]
                             content = json.dumps(manifest).encode()
                         package.writestr(info, content)
                     if filename == "extra-member":
