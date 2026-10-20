@@ -9,9 +9,12 @@ repository, not a particular filename. Existing configurations created by
 Ansible, a Debian package, or DSC can already satisfy the desired state.
 
 Resource names use a PascalCase namespace (`DscExtras.PackageManagement`) and
-plural camelCase type (`aptRepositories`, `packages`). Package management currently
-supports APT/dpkg on Debian-family Linux only. DNF repositories and packages
-(`dnfRepositories` and a future DNF package backend) are deferred, not implemented.
+plural camelCase type (`aptRepositories`, `packages`). Package management selects
+APT/dpkg on Debian/Ubuntu and DNF/RPM on RHEL, Rocky Linux, and AlmaLinux 8, 9,
+and 10 using `/etc/os-release`, not the presence of commands on `PATH`.
+Unknown distributions and unvalidated derivatives return an actionable error;
+`ID_LIKE` alone does not opt a distribution into support.
+DNF repository management and DNF package removal are deferred.
 
 The repository implementation retains the structural rename from `dscapt` in
 `resources/apt`; existing repository behavior and safety rules are unchanged.
@@ -220,6 +223,159 @@ old source document/keyring when new files are needed. Existing trixie
 definitions are still discovered by URI and suite regardless of their names.
 This removes only the old `deb` definition; related `deb-src` entries must be
 managed separately.
+
+## DNF/RPM package installation
+
+The same `DscExtras.PackageManagement/packages` resource and Linux AMD64/ARM64
+binary support `ensure: Present` on RHEL/Rocky/AlmaLinux 8, 9, and 10.
+`rpm` and the platform's `dnf` must be on `PATH`. Necessary installations require
+the DNF 4 CLI; unrecognized versions (including DNF 5) fail explicitly rather
+than guessing transaction formats or exact-version behavior. Get and Test only
+read RPM metadata and never invoke DNF or refresh repository metadata.
+
+Use a scalar name or an unordered, nonempty array. Repository names are
+case-sensitive and may contain periods, underscores, hyphens and plus signs.
+Use `name:architecture`, such as `glibc:x86_64` or `tzdata:noarch`, to select
+exactly that architecture. Periods in names remain literal; use the colon
+qualifier rather than DNF's ambiguous `name.arch` notation.
+Unqualified names accept only the native RPM architecture or `noarch`, never
+an arbitrary installed multilib variant. Explicit architectures and local RPMs
+must appear in RPM's native compatible-architecture list. Availability still
+depends on the distribution's enabled repositories (for example, newer releases
+may not publish a multilib package even when RPM recognizes its architecture).
+
+```yaml
+resources:
+  - name: Development tools
+    type: DscExtras.PackageManagement/packages
+    properties:
+      name: [git, curl, vim]
+      ensure: Present
+  - name: Web server
+    type: DscExtras.PackageManagement/packages
+    properties:
+      name: nginx
+  - name: Application and prerequisites
+    type: DscExtras.PackageManagement/packages
+    properties:
+      name:
+        - jq
+        - /opt/packages/myapp-1.2.3-1.x86_64.rpm
+      updateCache: true
+```
+
+Local RPM identity comes from `rpm -qp`, **not its filename**: name, epoch,
+version, release and architecture must match installed metadata. Files must be
+regular, valid RPMs and remain accessible on every reconciliation, even after
+installation. Relative paths resolve against the resource process's working
+directory. Changing only archive bytes, without changing identity or EVR, does
+not trigger a reinstall. Overlapping or conflicting identities in a batch are
+rejected before installation.
+
+The observed `packages` array retains `requestedName`, `name`, `version`,
+`architecture`, `status`, and `installed`. RPM versions are reported as
+**`epoch:version-release`**, always including epoch (`0` when absent).
+Status is `installed` or `not-installed`; aggregate `state` is `Present`,
+`Absent`, or `Mixed`, independent of the requested `ensure`.
+Multiple installed versions (such as install-only kernels) are supported: any
+acceptable installed instance satisfies a request. RPM database presence is
+the installed-state authority; this does not verify every installed payload
+file or infer scriptlet success beyond native transaction exit status.
+
+Without `version`, any installed version is compliant and Set does not upgrade
+it. A scalar repository name may specify exact **`[epoch:]version-release`**;
+release is required and omitted epoch means zero. For example:
+
+```json
+{"name":"example:x86_64","version":"1:2.3.4-5.el9","ensure":"Present"}
+```
+
+This illustrative version must actually exist in the configured repositories.
+Version is not valid with an array or a local artifact. Exact requests may
+upgrade; downgrades require `allowDowngrade: true`. Ordering compares epoch,
+version and release separately using RPM's built-in Lua `rpm.vercmp`, with no
+Python bindings, RPM SDK or rpmdevtools dependency. Native RPM semantics, not
+lexical or Debian comparisons, determine equality and ordering.
+
+Set sends only noncompliant requests to one native DNF install transaction,
+including mixed repository/local batches. DNF resolves and installs dependencies.
+An entirely compliant batch is a strict no-op, including when `updateCache` is
+true. For a necessary transaction, `updateCache: true` adds `--refresh` to its
+first preflight; repository failures are propagated, not silently skipped.
+There are no timestamps, background refreshes or separate periodic refreshes.
+DNF may still perform its normal configured metadata refresh.
+
+### DNF transaction safety and limitations
+
+Before mutation, DNF's C-locale `--assumeno` transaction table must describe
+exactly the requested identities/versions, plus dependencies. Unknown output,
+ambiguous identities, erasures, replacements, reinstalls and unauthorized
+downgrades fail closed. Repository targets are pinned to the resolved full
+NEVRAs and the preflight is repeated. The plan, installed inventory and local
+RPM metadata must remain unchanged before execution. This also prevents a
+capability/provides match or name prefix from being accepted as the request.
+If dependencies would change an already-compliant member of the requested
+batch, Set refuses that transaction rather than silently upgrading it.
+
+The executing DNF command additionally requests native `protected_packages`
+protection for **every initially installed package name**. This is defense in
+depth, not a substitute for preflight: some libdnf versions can still propose an
+obsoleting provider despite that protection. Both plans must therefore explicitly
+reject every `replacing` row as well as removal actions. The temporary protection
+list is removed after the operation. Commands also set `obsoletes=False` and
+disable install-only pruning; old kernels are not automatically deleted to
+enforce an install-only limit. The obsoletes option alone does not prevent an
+explicitly requested RPM from replacing another installed package.
+No `--allowerasing`, `--skip-broken`, `--nogpgcheck`, direct RPM installs, deleted
+lock files, or dependency/signature bypasses are used. Host repository and local
+package signature policy is retained, including enabled subscription plugins.
+Post-transaction checks require the requested state and retention of every
+previously installed name/architecture.
+
+Commands use direct argument arrays, a stable locale and bounded contexts
+(30 seconds for RPM, 15 minutes per DNF command). Set requires root/equivalent
+permissions, writable DNF/RPM state and a writable temporary directory.
+Unavailable packages/versions, disabled or unreachable repositories, signature
+failures, dependency conflicts and lock failures produce errors with native
+diagnostics and exit status. Repository configuration is not created or repaired.
+
+**Concurrency and rollback:** preflights are not an atomic reservation of a
+transaction. Native DNF/RPM locking remains in use, but native protection alone
+does not guarantee that a newly resolved transaction cannot replace a package.
+External inventory, metadata, configuration or artifact changes after the final
+checks can invalidate the plan. Serialize other package/repository maintenance
+with `dscd`. Package scripts, cancellation and failed transactions
+can leave changes behind; this resource does not promise rollback. Inspect
+native package-manager state before retrying concurrently.
+
+`ensure: Absent` is explicitly unsupported for all DNF Get/Test/Set operations,
+even if the package is missing; no removal is attempted. Safe removal and
+`dnfRepositories` will be implemented separately. APT installation, removal,
+automatic-dependency cleanup, and APT repository management remain unchanged.
+
+### Native DNF integration tests
+
+Run `DSCPM_DNF_CONTAINER=1 go test -v -count=1 -timeout=20m ./internal/dnf -run
+'^TestDNFContainer$'` from this module (set the variable using your shell's
+syntax). Override `DSCPM_DNF_IMAGE` for a specific Rocky image. CI gates release
+builds on Rocky 8, 9 and 10 containers from
+`quay.io/rockylinux/rockylinux`, alongside the existing APT and Go/DSC tests.
+All fixture builds and package mutations occur in disposable, unmounted
+containers. Native tests cover configured repositories, exact versions, mixed
+batches, local RPM metadata, upgrades/downgrades, idempotence, Obsoletes rejection,
+unsupported removal and the shipped manifest using SHA-256-pinned DSC 3.3.0.
+The default Docker Library `rockylinux:10` tag is not available; use the official
+Quay namespace for that release. Native runs exercised DNF 4.7/RPM 4.14 on
+Rocky 8, DNF 4.14/RPM 4.16 on Rocky 9, and DNF 4.20/RPM 4.19 on Rocky 10.
+All three expose the required embedded RPM comparison and DNF 4 transaction
+format; Rocky 10 still ships DNF 4, not DNF 5.
+Rocky 10's native solver proposed a `replacing` row for a fixture with both
+`Obsoletes` and `Provides` despite native protection; the resource's preflight
+rejected it before mutation. The integration test accepts either a native
+protected-package rejection or this explicit preflight rejection, and requires
+unchanged RPM inventory and DNF history in both cases.
+RHEL and AlmaLinux compatibility follows their
+DNF 4/RPM interfaces; subscription-enabled RHEL images are not exercised in CI.
 
 ## APT packages
 

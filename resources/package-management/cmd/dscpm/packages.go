@@ -9,9 +9,27 @@ import (
 	"io"
 
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/apt"
+	"github.com/Bpoe/dsc-extras/resources/package-management/internal/dnf"
+	"github.com/Bpoe/dsc-extras/resources/package-management/internal/packages"
+	"github.com/Bpoe/dsc-extras/resources/package-management/internal/platform"
 )
 
-func runPackages(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, manager *apt.PackageManager) int {
+func packageBackend(detect func() (string, error)) (packages.Manager, error) {
+	backend, err := detect()
+	if err != nil {
+		return nil, err
+	}
+	switch backend {
+	case "apt":
+		return apt.NewPackageManager(nil), nil
+	case "dnf":
+		return dnf.NewPackageManager(nil), nil
+	default:
+		return nil, fmt.Errorf("unsupported package backend %q", backend)
+	}
+}
+
+func runPackages(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, manager packages.Manager) int {
 	if len(args) != 1 || (args[0] != "get" && args[0] != "test" && args[0] != "set") {
 		return reportError(stderr, "expected one packages operation: get, test, or set")
 	}
@@ -24,7 +42,7 @@ func runPackages(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	var desired apt.Packages
+	var desired packages.Packages
 	if err := decoder.Decode(&desired); err != nil {
 		return reportError(stderr, fmt.Sprintf("invalid packages JSON input: %v", err))
 	}
@@ -45,7 +63,13 @@ func runPackages(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		}
 	}
 
-	var actual apt.Packages
+	if manager == nil {
+		manager, err = packageBackend(platform.Detect)
+		if err != nil {
+			return reportError(stderr, err.Error())
+		}
+	}
+	var actual packages.Packages
 	var differences []string
 	switch args[0] {
 	case "get":
@@ -65,7 +89,7 @@ func runPackages(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	}
 	if args[0] == "test" {
 		result := struct {
-			apt.Packages
+			packages.Packages
 			InDesiredState bool `json:"_inDesiredState"`
 		}{actual, len(differences) == 0}
 		if code := writeJSON(stdout, result, stderr); code != 0 {

@@ -4,7 +4,6 @@ on:
   pull_request:
     paths:
       - ".github/workflows/dscpm.yml"
-      - ".github/tests/test_dscpm_release.py"
       - "resources/package-management/**"
   push:
     branches:
@@ -13,7 +12,6 @@ on:
       - "dscpm-v*"
     paths:
       - ".github/workflows/dscpm.yml"
-      - ".github/tests/test_dscpm_release.py"
       - "resources/package-management/**"
   workflow_dispatch:
 
@@ -102,8 +100,31 @@ jobs:
           docker info > /dev/null
           go test -v -count=1 ./internal/apt -run '^TestPackagesContainerRemoval$'
 
+  dnf-container:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ["8", "9", "10"]
+    defaults:
+      run:
+        working-directory: resources/package-management
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: resources/package-management/go.mod
+          cache-dependency-path: resources/package-management/go.mod
+      - name: Test real DNF, RPM and DSC in disposable Rocky Linux container
+        env:
+          DSCPM_DNF_CONTAINER: "1"
+          DSCPM_DNF_IMAGE: quay.io/rockylinux/rockylinux:${{ matrix.release }}
+        run: |
+          docker info > /dev/null
+          go test -v -count=1 -timeout=20m ./internal/dnf -run '^TestDNFContainer$'
+
   build:
-    needs: [test, apt-container]
+    needs: [test, apt-container, dnf-container]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
