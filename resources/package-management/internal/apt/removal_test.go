@@ -281,11 +281,11 @@ func TestRemovalNativeAutomaticPackageNotices(t *testing.T) {
 	state := removalSnapshot{
 		active: map[string]PackageState{"nginx:amd64": {Name: "nginx", Architecture: "amd64", Version: "1"}},
 	}
-	for _, notice := range []string{
-		"The following package was automatically installed and is no longer required:",
-		"The following packages were automatically installed and are no longer required:",
+	for _, notice := range []struct{ header, instruction string }{
+		{"The following package was automatically installed and is no longer required:", "Use 'apt autoremove' to remove it."},
+		{"The following packages were automatically installed and are no longer required:", "Use 'apt autoremove' to remove them."},
 	} {
-		output := notice + "\n  old-orphan\nUse 'apt autoremove' to remove them.\n" + removalOutput("nginx")
+		output := notice.header + "\n  old-orphan\n" + notice.instruction + "\n" + removalOutput("nginx")
 		if _, err := parseRemoval([]byte(output), state); err != nil {
 			t.Fatalf("rejected native automatic-package notice: %v", err)
 		}
