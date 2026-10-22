@@ -1,0 +1,67 @@
+{
+  "$schema": "https://aka.ms/dsc/schemas/v3.1/bundled/resource/manifest.json",
+  "type": "DscExtras.Linux/services",
+  "version": "0.1.0",
+  "description": "Manage Linux systemd unit activation, persistent enablement and persistent masking independently",
+  "kind": "resource",
+  "get": {
+    "executable": "dsclinux",
+    "args": ["services", "get"],
+    "input": "stdin"
+  },
+  "test": {
+    "executable": "dsclinux",
+    "args": ["services", "test"],
+    "input": "stdin",
+    "return": "stateAndDiff"
+  },
+  "set": {
+    "executable": "dsclinux",
+    "args": ["services", "set"],
+    "input": "stdin",
+    "implementsPretest": true,
+    "return": "state"
+  },
+  "schema": {
+    "embedded": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "Linux services",
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "description": "Literal systemd unit name; names without a unit type suffix resolve to .service. Templates manage persistent instance enablement and masking, not runtime state.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "x-dsc-key": true
+        },
+        "state": {
+          "description": "Desired ActiveState for a concrete unit or instance, not a template. Unmanaged when omitted. Returned only for active/inactive; see activeState for all raw states.",
+          "type": "string",
+          "enum": ["active", "inactive"]
+        },
+        "enabled": {
+          "description": "Persistent enablement symlinks, independent of masking. Unmanaged when omitted.",
+          "type": "boolean"
+        },
+        "masked": {
+          "description": "Persistent unit-file mask, independent of enablement. Unmanaged when omitted.",
+          "type": "boolean"
+        },
+        "scope": {
+          "description": "System manager or the calling user's manager; never switches users.",
+          "type": "string",
+          "enum": ["system", "user"],
+          "default": "system"
+        },
+        "activeState": {"type": "string", "readOnly": true},
+        "subState": {"type": "string", "readOnly": true},
+        "loadState": {"type": "string", "readOnly": true},
+        "unitFileState": {"type": "string", "readOnly": true},
+        "_inDesiredState": {"type": ["boolean", "null"], "readOnly": true}
+      },
+      "additionalProperties": true
+    }
+  }
+}
