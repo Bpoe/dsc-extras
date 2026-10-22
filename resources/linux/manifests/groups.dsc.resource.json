@@ -1,0 +1,96 @@
+{
+  "$schema": "https://aka.ms/dsc/schemas/v3.1/bundled/resource/manifest.json",
+  "type": "DscExtras.Linux/groups",
+  "version": "0.1.0",
+  "description": "Manage local Linux group existence, numeric GID and supplementary membership",
+  "kind": "resource",
+  "get": {
+    "executable": "dsclinux",
+    "args": ["groups", "get"],
+    "input": "stdin"
+  },
+  "test": {
+    "executable": "dsclinux",
+    "args": ["groups", "test"],
+    "input": "stdin",
+    "return": "stateAndDiff"
+  },
+  "set": {
+    "executable": "dsclinux",
+    "args": ["groups", "set"],
+    "input": "stdin",
+    "implementsPretest": true,
+    "return": "state"
+  },
+  "schema": {
+    "embedded": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "Linux groups",
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "description": "Literal local Linux group name; externally managed groups cannot be created or modified.",
+          "type": "string",
+          "minLength": 1,
+          "x-dsc-key": true
+        },
+        "ensure": {
+          "description": "Whether the local group exists.",
+          "type": "string",
+          "enum": ["Present", "Absent"],
+          "default": "Present"
+        },
+        "gid": {
+          "description": "Numeric GID; unmanaged when omitted. Native groupmod may update local users' primary GIDs; filesystem ownership is not migrated.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967294
+        },
+        "members": {
+          "description": "Exact supplementary membership. Omitted means unmanaged; [] removes all supplementary members.",
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "includedMembers": {
+          "description": "Required supplementary members; preserves unrelated members.",
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "excludedMembers": {
+          "description": "Users required not to belong to the group, including through primary membership. Primary-group exclusion cannot converge without external reassignment.",
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "_inDesiredState": {"type": ["boolean", "null"], "readOnly": true}
+      },
+      "allOf": [
+        {
+          "not": {
+            "allOf": [
+              {"required": ["members"]},
+              {"anyOf": [{"required": ["includedMembers"]}, {"required": ["excludedMembers"]}]}
+            ]
+          }
+        },
+        {
+          "if": {"required": ["ensure"], "properties": {"ensure": {"const": "Absent"}}},
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["gid"]},
+                {"required": ["members"]},
+                {"required": ["includedMembers"]},
+                {"required": ["excludedMembers"]}
+              ]
+            }
+          }
+        }
+      ],
+      "additionalProperties": true
+    }
+  }
+}

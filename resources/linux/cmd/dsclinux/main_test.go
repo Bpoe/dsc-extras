@@ -72,12 +72,12 @@ func (f *fakeManager) Set(ctx context.Context, desired services.Unit) (services.
 func call(t *testing.T, manager serviceManager, args []string, input string) (int, string, string) {
 	t.Helper()
 	var stdout, stderr strings.Builder
-	code := run(t.Context(), args, strings.NewReader(input), &stdout, &stderr, manager)
+	code := run(t.Context(), args, strings.NewReader(input), &stdout, &stderr, manager, nil)
 	return code, stdout.String(), stderr.String()
 }
 
 func TestFlagsAndDispatch(t *testing.T) {
-	for _, args := range [][]string{nil, {"get"}, {"groups", "get"}, {"services"}, {"services", "restart"}, {"services", "get", "extra"}} {
+	for _, args := range [][]string{nil, {"get"}, {"users", "get"}, {"services"}, {"services", "restart"}, {"services", "get", "extra"}} {
 		code, stdout, stderr := call(t, newFakeManager(), args, `{}`)
 		if code == 0 || stdout != "" || !json.Valid([]byte(stderr)) {
 			t.Fatalf("%v = %d %q %q", args, code, stdout, stderr)

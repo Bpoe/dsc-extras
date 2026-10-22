@@ -34,6 +34,10 @@ jobs:
         id: version
         run: |
           version=$(jq -er '.version | select(type == "string")' manifests/services.dsc.resource.json)
+          if [[ "$(jq -er '.version' manifests/groups.dsc.resource.json)" != "$version" ]]; then
+            echo "::error::Linux resource manifest versions must agree."
+            exit 1
+          fi
           if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/tags/dsclinux-v* ]]; then
             version="${GITHUB_REF#refs/tags/dsclinux-v}"
           fi
@@ -98,8 +102,24 @@ jobs:
           DSCLINUX_SYSTEMD_CONTAINER: "1"
         run: go test -v -count=1 -timeout=6m ./internal/services -run '^TestSystemdContainer$'
 
+  groups-container:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: resources/linux
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: resources/linux/go.mod
+          cache-dependency-path: resources/linux/go.mod
+      - name: Test real account management in a disposable container
+        env:
+          DSCLINUX_GROUPS_CONTAINER: "1"
+        run: go test -v -count=1 -timeout=6m ./internal/groups -run '^TestGroupsContainer$'
+
   build:
-    needs: [test, systemd-container]
+    needs: [test, systemd-container, groups-container]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -124,12 +144,14 @@ jobs:
           package_dir="dist/linux-${GOARCH}"
           mkdir -p "$package_dir"
           go build -trimpath -ldflags "-X main.version=${VERSION}" -o "$package_dir/dsclinux" ./cmd/dsclinux
-          jq --arg version "$VERSION" '.version = $version' manifests/services.dsc.resource.json > "$package_dir/services.dsc.resource.json"
+          for resource in services groups; do
+            jq --arg version "$VERSION" '.version = $version' "manifests/${resource}.dsc.resource.json" > "$package_dir/${resource}.dsc.resource.json"
+          done
           cp ../../LICENSE "$package_dir/"
           chmod 755 "$package_dir/dsclinux"
           (
             cd "$package_dir"
-            zip -X "../dsclinux-${VERSION}-linux-${GOARCH}.zip" dsclinux services.dsc.resource.json LICENSE
+            zip -X "../dsclinux-${VERSION}-linux-${GOARCH}.zip" dsclinux services.dsc.resource.json groups.dsc.resource.json LICENSE
           )
       - name: Verify package
         env:
@@ -139,17 +161,20 @@ jobs:
           archive="dist/dsclinux-${VERSION}-linux-${GOARCH}.zip"
           check_dir="dist/check-${GOARCH}"
           unzip -t "$archive"
-          test "$(unzip -Z1 "$archive" | LC_ALL=C sort)" = "$(printf '%s\n' LICENSE dsclinux services.dsc.resource.json | LC_ALL=C sort)"
+          test "$(unzip -Z1 "$archive" | LC_ALL=C sort)" = "$(printf '%s\n' LICENSE dsclinux services.dsc.resource.json groups.dsc.resource.json | LC_ALL=C sort)"
           unzip -q "$archive" -d "$check_dir"
           test -x "$check_dir/dsclinux"
-          test "$(jq -r '.version' "$check_dir/services.dsc.resource.json")" = "$VERSION"
-          test "$(jq -r '.type' "$check_dir/services.dsc.resource.json")" = "DscExtras.Linux/services"
-          jq -e '
-            . as $manifest | ["get", "test", "set"] | all(
-              . as $operation | $manifest[$operation] |
-              .executable == "dsclinux" and .args == ["services", $operation]
-            )
-          ' "$check_dir/services.dsc.resource.json" > /dev/null
+          for resource in services groups; do
+            manifest="$check_dir/${resource}.dsc.resource.json"
+            test "$(jq -r '.version' "$manifest")" = "$VERSION"
+            test "$(jq -r '.type' "$manifest")" = "DscExtras.Linux/${resource}"
+            jq -e --arg resource "$resource" '
+              . as $manifest | ["get", "test", "set"] | all(
+                . as $operation | $manifest[$operation] |
+                .executable == "dsclinux" and .args == [$resource, $operation]
+              )
+            ' "$manifest" > /dev/null
+          done
           build_info=$(go version -m "$check_dir/dsclinux")
           grep -Fq 'GOOS=linux' <<< "$build_info"
           grep -Fq "GOARCH=${GOARCH}" <<< "$build_info"
@@ -200,4 +225,4 @@ jobs:
             --draft \
             --verify-tag \
             --title "dsclinux ${VERSION}" \
-            --notes "Linux AMD64 and ARM64 ZIPs for dsclinux ${VERSION}. Each ZIP contains dsclinux, services.dsc.resource.json, and LICENSE."
+            --notes "Linux AMD64 and ARM64 ZIPs for dsclinux ${VERSION}. Each ZIP contains dsclinux, services.dsc.resource.json, groups.dsc.resource.json, and LICENSE."

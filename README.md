@@ -18,7 +18,14 @@ directory and can be built, tested, and released independently.
   retrieves Azure Key Vault secrets for DSC's `secret()` configuration function.
 - [Linux component (`dsclinux`)](resources/linux/README.md) provides
   `DscExtras.Linux/services` to manage systemd unit activation, persistent
-  enablement, and persistent masking independently, for system and user scopes.
+  enablement, and persistent masking independently, for system and user scopes,
+  and `DscExtras.Linux/groups` to manage local group existence, GID, and exact
+  or selective supplementary membership. Omitted group properties remain
+  unmanaged; `members: []` clears supplementary membership. Primary groups are
+  not explicitly reassigned, although native GID changes may update local
+  primary GIDs; filesystem ownership is not migrated. External LDAP/NIS groups
+  are not managed. See the component guide for Docker-group inclusion and
+  other DSC YAML examples.
 
 Resource names use a PascalCase namespace and plural camelCase type, as in
 `DscExtras.PackageManagement/aptRepositories` and
