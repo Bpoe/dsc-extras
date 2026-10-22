@@ -7,24 +7,19 @@ import (
 	"maps"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 )
 
 type removalSnapshot struct {
-	packages, automatic, config string
-	active                      map[string]PackageState
-	auto                        map[string]bool
+	packages, config string
+	active           map[string]PackageState
 }
 
-func removalArguments(simulate, cleanup bool, targets []string) []string {
+func removalArguments(simulate bool, targets []string) []string {
 	args := []string{"-o", "Dpkg::Use-Pty=0", "-o", "APT::Cmd::Pattern-Only=true",
 		"-o", "APT::Get::Purge=false", "-o", "APT::Get::AutomaticRemove=false", "--yes"}
 	if simulate {
 		args = append(args, "--simulate")
-	}
-	if cleanup {
-		args = append(args, "--auto-remove")
 	}
 	return append(append(args, "remove", "--"), targets...)
 }
@@ -51,7 +46,7 @@ func removalIdentity(token string, active map[string]PackageState) (string, erro
 }
 
 func (m *PackageManager) removalState(ctx context.Context) (removalSnapshot, error) {
-	state := removalSnapshot{active: map[string]PackageState{}, auto: map[string]bool{}}
+	state := removalSnapshot{active: map[string]PackageState{}}
 	output, err := m.run(ctx, "dpkg-query", "--show", packageQueryFormat)
 	if err != nil {
 		return state, err
@@ -83,30 +78,6 @@ func (m *PackageManager) removalState(ctx context.Context) (removalSnapshot, err
 		}
 		state.active[identity] = PackageState{Name: name, Architecture: fields[3], Status: fields[1], Version: fields[2]}
 	}
-	output, err = m.run(ctx, "apt-mark", "showauto")
-	if err != nil {
-		return state, err
-	}
-	state.automatic = string(output)
-	for _, token := range strings.Fields(state.automatic) {
-		// apt-mark can also report residual/uninstalled packages. They cannot
-		// authorize a removal, but their syntax must still be valid.
-		parts := strings.Split(token, ":")
-		if len(parts) > 2 || !packageToken.MatchString(parts[0]) ||
-			(len(parts) == 2 && !packageArchitecture.MatchString(parts[1])) {
-			return state, fmt.Errorf("cannot determine automatic-package status: invalid identity %q", token)
-		}
-		matches := 0
-		for identity, installed := range state.active {
-			if installed.Name == parts[0] && (len(parts) == 1 || installed.Architecture == parts[1]) {
-				matches++
-				state.auto[identity] = true
-			}
-		}
-		if matches > 1 {
-			return state, fmt.Errorf("cannot determine automatic-package status: ambiguous identity %q", token)
-		}
-	}
 	output, err = m.run(ctx, "apt-config", "dump")
 	if err != nil {
 		return state, err
@@ -119,13 +90,24 @@ func (m *PackageManager) removalState(ctx context.Context) (removalSnapshot, err
 }
 
 var removalOperation = regexp.MustCompile(`^Remv ([a-z0-9][a-z0-9+.:_-]*)(?: \[([^\s\]]+)\])?(?: \[[^\r\n]*\])?$`)
-var removalSummary = regexp.MustCompile(`^0 upgraded, 0 newly installed, ([0-9]+) to remove and [0-9]+ not upgraded\.$`)
 
 func parseRemoval(output []byte, state removalSnapshot) (map[string]bool, error) {
 	removed := map[string]bool{}
-	count, summaries := -1, 0
-	for _, line := range strings.Split(strings.TrimSuffix(string(output), "\n"), "\n") {
-		if match := removalOperation.FindStringSubmatch(line); match != nil {
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		// APT's action records describe the plan; human-readable notices and
+		// summaries do not authorize package operations.
+		switch fields[0] {
+		case "Inst", "Conf", "Purg":
+			return nil, fmt.Errorf("cannot validate unexpected APT simulation operation %q", line)
+		case "Remv":
+			match := removalOperation.FindStringSubmatch(line)
+			if match == nil {
+				return nil, fmt.Errorf("cannot validate APT removal operation %q", line)
+			}
 			identity, err := removalIdentity(match[1], state.active)
 			if err != nil {
 				return nil, err
@@ -134,35 +116,13 @@ func parseRemoval(output []byte, state removalSnapshot) (map[string]bool, error)
 				return nil, fmt.Errorf("cannot validate APT removal operation %q", line)
 			}
 			removed[identity] = true
-		} else if match := removalSummary.FindStringSubmatch(line); match != nil {
-			var err error
-			count, err = strconv.Atoi(match[1])
-			if err != nil {
-				return nil, err
-			}
-			summaries++
-		} else if line == "" || strings.HasPrefix(line, "Reading package lists...") ||
-			strings.HasPrefix(line, "Building dependency tree...") ||
-			strings.HasPrefix(line, "Reading state information...") ||
-			line == "The following packages will be REMOVED:" ||
-			line == "The following package was automatically installed and is no longer required:" ||
-			line == "The following packages were automatically installed and are no longer required:" ||
-			line == "Use 'apt autoremove' to remove it." ||
-			line == "Use 'apt autoremove' to remove them." ||
-			strings.HasPrefix(line, "  ") {
-			continue
-		} else {
-			return nil, fmt.Errorf("cannot validate unexpected APT simulation output %q", line)
 		}
-	}
-	if summaries != 1 || count != len(removed) {
-		return nil, errors.New("cannot validate APT simulation: missing or inconsistent removal operations")
 	}
 	return removed, nil
 }
 
-func (m *PackageManager) removalPlan(ctx context.Context, targets []string, cleanup bool, state removalSnapshot) (map[string]bool, error) {
-	output, err := m.run(ctx, "apt-get", removalArguments(true, cleanup, targets)...)
+func (m *PackageManager) removalPlan(ctx context.Context, targets []string, state removalSnapshot) (map[string]bool, error) {
+	output, err := m.run(ctx, "apt-get", removalArguments(true, targets)...)
 	if err != nil {
 		return nil, err
 	}
@@ -179,13 +139,13 @@ func (m *PackageManager) removalPlan(ctx context.Context, targets []string, clea
 	}
 	var unexpected []string
 	for identity := range plan {
-		if !requested[identity] && (!cleanup || !state.auto[identity]) {
+		if !requested[identity] {
 			unexpected = append(unexpected, identity)
 		}
 	}
 	if len(unexpected) != 0 {
 		slices.Sort(unexpected)
-		return nil, fmt.Errorf("cannot remove %s: APT would also remove %s, which was not explicitly requested. A dependent package requires the requested package, or cleanup would remove a manually installed package. Remove the dependent package explicitly or change the requested configuration",
+		return nil, fmt.Errorf("cannot remove %s: APT would also remove %s, which was not explicitly requested. Remove the dependent package explicitly or change the requested configuration",
 			strings.Join(targets, ", "), strings.Join(unexpected, ", "))
 	}
 	return plan, nil
@@ -205,35 +165,26 @@ func (m *PackageManager) validateRemoval(ctx context.Context, targets []string, 
 			return errors.New("package state changed before removal planning; reconcile again")
 		}
 	}
-	base, err := m.removalPlan(ctx, targets, false, state)
+	plan, err := m.removalPlan(ctx, targets, state)
 	if err != nil {
 		return err
 	}
-	cleanup, err := m.removalPlan(ctx, targets, true, state)
+	// Recompute the plan and re-read package/configuration state. These checks
+	// detect changes, but simulations do NOT hold APT's exclusive lock: an
+	// external writer can still race the final check and apt-get execution.
+	currentPlan, err := m.removalPlan(ctx, targets, state)
 	if err != nil {
 		return err
 	}
-	// Recompute both plans and re-read package/mark/configuration state. These
-	// checks detect changes, but simulations do NOT hold APT's exclusive lock:
-	// an external writer can still race the final check and apt-get execution.
-	for _, plan := range []struct {
-		cleanup bool
-		want    map[string]bool
-	}{{false, base}, {true, cleanup}} {
-		got, err := m.removalPlan(ctx, targets, plan.cleanup, state)
-		if err != nil {
-			return err
-		}
-		if !maps.Equal(got, plan.want) {
-			return errors.New("APT removal plan changed during validation; reconcile again")
-		}
+	if !maps.Equal(currentPlan, plan) {
+		return errors.New("APT removal plan changed during validation; reconcile again")
 	}
 	current, err := m.removalState(ctx)
 	if err != nil {
 		return err
 	}
-	if current.packages != state.packages || current.automatic != state.automatic || current.config != state.config {
-		return errors.New("APT package, automatic-mark, or configuration state changed during validation; reconcile again")
+	if current.packages != state.packages || current.config != state.config {
+		return errors.New("APT package or configuration state changed during validation; reconcile again")
 	}
 	return nil
 }

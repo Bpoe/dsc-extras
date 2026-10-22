@@ -398,7 +398,7 @@ func (m *PackageManager) Set(ctx context.Context, desired Packages) (Packages, e
 		if err := m.validateRemoval(ctx, arguments, before.Packages); err != nil {
 			return before, err
 		}
-		args = removalArguments(false, true, arguments)
+		args = removalArguments(false, arguments)
 	} else {
 		args = append(args, "--no-remove")
 		if desired.AllowDowngrade {

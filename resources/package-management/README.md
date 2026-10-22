@@ -351,7 +351,7 @@ native package-manager state before retrying concurrently.
 `ensure: Absent` is explicitly unsupported for all DNF Get/Test/Set operations,
 even if the package is missing; no removal is attempted. Safe removal and
 `dnfRepositories` will be implemented separately. APT installation, removal,
-automatic-dependency cleanup, and APT repository management remain unchanged.
+and APT repository management are independent of DNF support.
 
 ### Native DNF integration tests
 
@@ -465,7 +465,7 @@ other failures remain errors. `Get` and `Set` still fail for a missing archive,
 because its identity cannot be reported and installation cannot proceed; `Set`
 never silently skips it.
 
-### Safe removal and automatic dependency cleanup
+### Safe removal without automatic dependency cleanup
 
 `ensure: Absent` removes only the noncompliant, explicitly requested package
 identities, preserving architecture qualifiers. Removal is safe by default:
@@ -477,30 +477,28 @@ configuration. This protects reverse-dependent packages whether they are marked
 manually **or automatically** installed. There is no force flag, dependency-removal
 override, or automatic expansion of the explicit request.
 
-This differs from cleaning up orphaned dependencies: removing `nginx` may leave
-its automatically installed `libfoo` and `libbar` unused. A second simulation
-uses APT's native `--auto-remove` dependency solver. Additional removals are
-allowed only when `apt-mark showauto` identifies them as automatically installed;
-the plain removal simulation must not have required them as reverse-dependent
-removals. A dependency still needed by another remaining package is retained by
-APT. Manually installed packages are never automatically cleaned up; they must
-be explicitly requested for removal.
+Removing `nginx` may leave its automatically installed `libfoo` and `libbar`
+unused. These dependencies and any previously orphaned packages remain installed
+unless explicitly requested for removal. APT's informational suggestions to run
+`apt autoremove` or `sudo apt autoremove` do not trigger cleanup. Automatic
+removal is explicitly disabled for both simulations and execution, even if
+enabled in the host's APT configuration.
 
-Once validated, the resource executes one `apt-get --yes --auto-remove remove`
-transaction, not a separate `autoremove` operation, and verifies that all
-explicitly requested packages are absent afterward. This can also clean up
-**unrelated, previously orphaned automatically installed packages**, not just
-dependencies orphaned by this removal. An entirely absent request is a strict
-no-op: no APT simulation, removal, or unrelated cleanup runs.
+Once validated, the resource executes one `apt-get --yes remove` transaction
+and verifies that all explicitly requested packages are absent afterward.
+An entirely absent request is a strict no-op: no APT simulation or removal runs.
 Removal never requests purge; residual configuration files are retained.
 
 Planning parses actual `Remv` operations, checks identities against the dpkg
-inventory and removal counts, and rejects unknown/ambiguous identities,
+inventory, and rejects unknown/ambiguous identities,
 unexpected installs/upgrades/downgrades/configuration/purge operations,
-malformed output, failed commands, or unavailable automatic-package status.
-Unknown APT output formats fail closed rather than being guessed.
-Both removal plans are repeated, and the complete dpkg inventory, automatic
-marks, and effective APT configuration are rechecked before execution.
+malformed action records, and failed commands. Other informational output,
+including human-readable summaries and autoremove notices, is ignored rather
+than matched against a message allowlist. Only action records authorize removals;
+a successful simulation with no actions is a no-op and cannot satisfy a requested
+removal. APT command failures retain their native exit status and diagnostics.
+The removal plan is repeated, and the complete dpkg inventory and effective
+APT configuration are rechecked before execution.
 Detectable changes abort reconciliation without executing the removal.
 
 **Concurrency limitation:** APT simulations do not acquire an exclusive APT
@@ -509,7 +507,7 @@ manager, repository metadata change, or configuration writer can still change
 state after a check and before the real APT solver acquires its locks.
 Serialize external package/repository maintenance with dscd reconciliation;
 do not rely on simulations for atomic protection against concurrent writers.
-Package removal and dependency cleanup are not guaranteed transactional or
+Package removal is not guaranteed transactional or
 reversible: maintainer scripts or a failed APT transaction may leave partial
 changes, and there is no rollback or configuration-file purge.
 
@@ -751,6 +749,6 @@ creates a disposable `debian:bookworm-slim` container with `--rm`, no host mount
 and networking disabled (the runtime may first download the image). Synthetic
 packages and all real `PackageManager.Set` transactions stay inside that
 container, which is forcibly removed during test cleanup. Coverage includes
-manual and automatic reverse-dependent rejection, orphan dependency cleanup,
+manual and automatic reverse-dependent rejection, orphan dependency retention,
 shared/manual dependency retention, preserved conffiles, and idempotent absence.
 The `apt-container` CI job enables this test; it never mutates host packages.

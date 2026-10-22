@@ -91,14 +91,16 @@ make_deb() {
     dpkg-deb --build "$package" "$package.deb"
 }
 make_deb dscpm-orphan ''
+make_deb dscpm-old-orphan ''
 make_deb dscpm-shared ''
 make_deb dscpm-manual ''
 make_deb dscpm-app 'dscpm-orphan, dscpm-shared, dscpm-manual'
 make_deb dscpm-consumer 'dscpm-shared'
-dpkg -i ./dscpm-orphan.deb ./dscpm-shared.deb ./dscpm-manual.deb ./dscpm-app.deb ./dscpm-consumer.deb
+dpkg -i ./dscpm-orphan.deb ./dscpm-old-orphan.deb ./dscpm-shared.deb ./dscpm-manual.deb ./dscpm-app.deb ./dscpm-consumer.deb
 # Isolate the fixture graph from the image's pre-existing automatic marks.
 dpkg-query --show --showformat='${binary:Package}\n' | xargs apt-mark manual
-apt-mark auto dscpm-orphan dscpm-shared
+apt-mark auto dscpm-orphan dscpm-old-orphan dscpm-shared
+printf 'APT::Get::AutomaticRemove "true";\n' > /etc/apt/apt.conf.d/99dscpm-test
 `
 	command := exec.CommandContext(ctx, tool, "exec", "-i", name, "sh", "-s")
 	command.Stdin = strings.NewReader(script)
@@ -150,7 +152,7 @@ apt-mark auto dscpm-orphan dscpm-shared
 		})
 	}
 	run(t, "apt-mark", "manual", "dscpm-app")
-	t.Run("explicit-removal-and-orphan-cleanup", func(t *testing.T) {
+	t.Run("explicit-removal-retains-orphans", func(t *testing.T) {
 		actual, err := manager.Set(ctx, absent("dscpm-app"))
 		if err != nil {
 			t.Fatal(err)
@@ -158,17 +160,15 @@ apt-mark auto dscpm-orphan dscpm-shared
 		if actual.State != "Absent" || executor.mutations != 1 {
 			t.Fatalf("removal result = %+v, mutations = %d", actual, executor.mutations)
 		}
-		for _, name := range []string{"dscpm-app", "dscpm-orphan"} {
-			checkInstalled(t, name, false)
-			status := run(t, "dpkg-query", "--show", "--showformat=${Status}", name)
-			if status != "deinstall ok config-files" {
-				t.Fatalf("%s status = %q, expected retained conffiles", name, status)
-			}
-			if content := run(t, "cat", "/etc/"+name+".conf"); content != "retained configuration\n" {
-				t.Fatalf("%s conffile changed: %q", name, content)
-			}
+		checkInstalled(t, "dscpm-app", false)
+		status := run(t, "dpkg-query", "--show", "--showformat=${Status}", "dscpm-app")
+		if status != "deinstall ok config-files" {
+			t.Fatalf("dscpm-app status = %q, expected retained conffiles", status)
 		}
-		for _, name := range []string{"dscpm-shared", "dscpm-manual", "dscpm-consumer"} {
+		if content := run(t, "cat", "/etc/dscpm-app.conf"); content != "retained configuration\n" {
+			t.Fatalf("dscpm-app conffile changed: %q", content)
+		}
+		for _, name := range []string{"dscpm-orphan", "dscpm-old-orphan", "dscpm-shared", "dscpm-manual", "dscpm-consumer"} {
 			checkInstalled(t, name, true)
 		}
 	})
