@@ -17,6 +17,56 @@ import (
 
 func ptr[T any](value T) *T { return &value }
 
+func TestSplitGroupMembershipSet(t *testing.T) {
+	const entries = "other:x:100:carol\ndev:x:2000:alice\ndev:x:2000:bob,old\n"
+	for _, input := range []string{
+		`{"name":"dev","includedMembers":["carol"]}`,
+		`{"name":"dev","excludedMembers":["alice"]}`,
+		`{"name":"dev","excludedMembers":["old"]}`,
+		`{"name":"dev","members":["bob","carol"]}`,
+		`{"name":"dev","members":[]}`,
+		`{"name":"dev","gid":2001,"members":[]}`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			m, f := fixture(t, entries)
+			want := desired(t, input)
+			for range 2 {
+				actual, diff, err := m.Test(t.Context(), want)
+				if err != nil || len(diff) == 0 || !slices.Equal(memberList(actual), []string{"alice", "bob", "old"}) {
+					t.Fatalf("Test did not compare combined membership: %+v %v %v", actual, diff, err)
+				}
+				if _, err := m.Set(t.Context(), want); err == nil ||
+					!strings.Contains(err.Error(), "split-group membership modification is unsupported") ||
+					!strings.Contains(err.Error(), "before retrying") {
+					t.Fatalf("expected actionable split-group error, got %v", err)
+				}
+				data, err := os.ReadFile(filepath.Join(m.root, "etc", "group"))
+				if err != nil || string(data) != entries || len(f.mutations) != 0 {
+					t.Fatalf("unsupported Set changed accounts: %q %v %v", data, f.mutations, err)
+				}
+			}
+		})
+	}
+	for _, input := range []string{
+		`{"name":"dev"}`,
+		`{"name":"dev","members":["old","bob","alice"]}`,
+		`{"name":"dev","includedMembers":["old"],"excludedMembers":["carol"]}`,
+		`{"name":"dev","includedMembers":[],"excludedMembers":[]}`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			m, f := fixture(t, entries)
+			for range 2 {
+				if _, err := m.Set(t.Context(), desired(t, input)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(f.mutations) != 0 {
+				t.Fatalf("compliant Set invoked mutations: %v", f.mutations)
+			}
+		})
+	}
+}
+
 type exitStatus int
 
 func (s exitStatus) Error() string { return fmt.Sprintf("exit status %d", s) }
@@ -194,7 +244,6 @@ func TestSetReconciliation(t *testing.T) {
 		{"create members", "", `{"name":"dev","members":["alice"]}`, []string{"groupadd -- dev", "gpasswd -a alice dev"}, []string{"alice"}},
 		{"unknown properties", "dev:x:2000:old\n", `{"name":"dev","future":{"ignored":true}}`, nil, []string{"old"}},
 		{"split compliant", "dev:x:2000:alice,bob\ndev:x:2000:bob,carol\n", `{"name":"dev","members":["carol","alice","bob"]}`, nil, []string{"alice", "bob", "carol"}},
-		{"split reconcile", "dev:x:2000:alice\ndev:x:2000:bob\n", `{"name":"dev","members":["carol","bob"]}`, []string{"gpasswd -a carol dev", "gpasswd -d alice dev"}, []string{"bob", "carol"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			m, f := fixture(t, test.before)

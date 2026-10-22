@@ -263,6 +263,16 @@ Split entries created with `MAX_MEMBERS_PER_GROUP` are combined when their name
 and GID agree, with sorted, deduplicated observed membership. Same-name entries
 with different GIDs are errors. Desired arrays still reject duplicates.
 
+Get and Test support these combined split memberships. Membership modification
+of a split group is unsupported: Debian's native `gpasswd` rejects duplicate
+entries and may not find a member outside the first entry. Set rejects any
+required membership change before invoking mutation tools, including when a GID
+change is also requested. Consolidate same-name, same-GID entries using your
+account-administration tools before retrying. Compliant membership requests
+remain no-ops; omitting membership constraints does not prevent independent
+existence or GID management. The resource never consolidates or rewrites account
+databases itself.
+
 `getent` performs NSS-aware identity lookups, including LDAP/NIS-backed users.
 An external-only group is locally Absent: Get reports Absent, Test compares
 local state, Set Present fails as externally managed, and Set Absent does
