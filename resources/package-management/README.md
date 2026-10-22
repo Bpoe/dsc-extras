@@ -388,7 +388,9 @@ definitions. It requires APT 2.2+ (Debian 11+/Ubuntu 22.04+) and `apt-get`, `dpk
 Use `name` as one package name or a nonempty array. An entry can
 also be a local `.deb` path; arrays can mix repository names and local files.
 Local paths may be absolute or relative to the resource process's working
-directory and must identify existing regular files. Arrays are unordered sets
+directory and must identify existing regular files for `Get` and `Set` (see
+[Local archives that do not exist yet](#local-archives-that-do-not-exist-yet)
+for `Test`). Arrays are unordered sets
 without duplicate entries. `ensure` defaults to `Present` and accepts only
 `Present` or `Absent`. Repository names may include an architecture qualifier,
 such as `libc6:amd64`. Unqualified names select the host's native architecture
@@ -402,7 +404,8 @@ candidate. A scalar repository package with `ensure: Present` may specify
 `version` to require an exact Debian version. `version` is not supported with an
 array, a local file, or `ensure: Absent`. A local `.deb` supplies its own exact
 package name, version, and architecture from its metadata; its file must remain
-available on every Get/Test/Set reconciliation, even after installation.
+available on every Get/Set reconciliation, even after installation (a missing
+file makes `Test` report noncompliance).
 Replacing or removing that file can therefore change or invalidate the desired
 state. Changing only a local archive's bytes, while its package name, version,
 and architecture remain unchanged, does not trigger a reinstall.
@@ -437,6 +440,30 @@ the operation rolled back or retrying concurrently.
 One APT transaction does not guarantee rollback: an APT failure or failed
 post-operation verification may leave partial changes. The next reconciliation
 queries installed state again before planning further work.
+
+### Local archives that do not exist yet
+
+A local `.deb` can be produced by another DSC resource (for example, a download)
+that this resource `dependsOn`. On a fresh machine, `dsc config test` runs before
+that archive exists, so `Test` treats a referenced archive that does not exist
+as **not in the desired state** rather than as an error: it exits successfully
+with `_inDesiredState: false` and an `ensure` difference. This applies to a
+single local `.deb` and to arrays mixing repository packages, existing archives,
+and missing archives; other entries are evaluated normally. `Test` never
+downloads, creates, or installs the archive.
+
+Because the archive's package identity cannot be determined, its `packages[]`
+entry contains only `requestedName` (with empty `name` and `status` and
+`installed: false`, meaning not confirmed installed), and no version or
+architecture. The aggregate `state` is omitted unless the other observed
+packages are already `Mixed`. Duplicate-identity checks cannot include the
+missing archive.
+
+Only a file-not-found condition is treated this way. Permission errors, a
+directory or other non-regular file, unreadable or invalid `.deb` metadata, and
+other failures remain errors. `Get` and `Set` still fail for a missing archive,
+because its identity cannot be reported and installation cannot proceed; `Set`
+never silently skips it.
 
 ### Safe removal and automatic dependency cleanup
 
@@ -506,7 +533,7 @@ The read-only `packages` array reports one entry per requested package:
 | Property | Meaning |
 | --- | --- |
 | `requestedName` | Original requested repository name or local `.deb` path. |
-| `name` | Resolved base package name, including the name read from local metadata; architecture is separate. |
+| `name` | Resolved base package name, including the name read from local metadata; architecture is separate. Empty for a missing local archive during `Test`. |
 | `installed` | Whether the requested package is installed. |
 | `status` | Full observed dpkg status string, such as `install ok installed`; empty when no record exists. |
 | `version` | Observed installed version. |
