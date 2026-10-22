@@ -34,7 +34,7 @@ func TestDSCResourceProcess(t *testing.T) {
 		if arg != "--" {
 			continue
 		}
-		code := run(t.Context(), os.Args[i+1:], os.Stdin, os.Stdout, os.Stderr, manager)
+		code := run(t.Context(), os.Args[i+1:], os.Stdin, os.Stdout, os.Stderr, manager, nil)
 		if manager.sets > 0 {
 			data, err := json.Marshal(manager.actual)
 			if err != nil {
@@ -182,7 +182,7 @@ func TestDSCAvailabilityPolicy(t *testing.T) {
 	for _, required := range []string{"0", "1"} {
 		t.Run("required="+required, func(t *testing.T) {
 			t.Setenv("DSCLINUX_REQUIRE_DSC", required)
-			output, err := exec.CommandContext(t.Context(), executable, "-test.run=^TestDSCIntegration$", "-test.v").CombinedOutput()
+			output, err := exec.CommandContext(t.Context(), executable, "-test.run=^TestDSC(Groups)?Integration$", "-test.v").CombinedOutput()
 			if required == "1" {
 				if err == nil || !bytes.Contains(output, []byte("DSC executable required")) {
 					t.Fatalf("missing required DSC must fail: %v\n%s", err, output)
