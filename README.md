@@ -16,6 +16,9 @@ directory and can be built, tested, and released independently.
   and 10 use DNF/RPM; DNF repositories and DNF removal remain future scope.
 - [Azure Key Vault secret extension (`dsckvsec`)](extensions/azure-keyvault/README.md)
   retrieves Azure Key Vault secrets for DSC's `secret()` configuration function.
+- [Linux component (`dsclinux`)](resources/linux/README.md) provides
+  `DscExtras.Linux/services` to manage systemd unit activation, persistent
+  enablement, and persistent masking independently, for system and user scopes.
 
 Resource names use a PascalCase namespace and plural camelCase type, as in
 `DscExtras.PackageManagement/aptRepositories` and
