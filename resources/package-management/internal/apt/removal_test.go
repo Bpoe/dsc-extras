@@ -4,9 +4,44 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 )
+
+func TestParseRemovalActionRecords(t *testing.T) {
+	state := removalSnapshot{
+		active: map[string]PackageState{"nginx:amd64": {Name: "nginx", Architecture: "amd64", Version: "1"}},
+	}
+	for _, tc := range []struct {
+		name, output string
+		removed      map[string]bool
+		wantError    bool
+	}{
+		{name: "installation", output: removalOutput() + "Inst nginx (1 Debian [amd64])\nConf nginx (1 Debian [amd64])\n", wantError: true},
+		{name: "upgrade", output: removalOutput() + "Inst nginx [1] (2 Debian [amd64])\n", wantError: true},
+		{name: "configuration", output: removalOutput() + "Conf nginx (1 Debian [amd64])\n", wantError: true},
+		{name: "purge", output: removalOutput() + "Purg nginx [1]\n", wantError: true},
+		{name: "removal", output: removalOutput("nginx"), removed: map[string]bool{"nginx:amd64": true}},
+		{name: "empty output", wantError: true},
+		{name: "no-op summary", output: removalOutput()},
+		{name: "no-op notice", output: removalOutput() + "Use 'sudo apt autoremove' to remove them.\n"},
+		{name: "informational output", output: "Additional APT information\n" + removalOutput("nginx") + "Use 'sudo apt autoremove' to remove them.\n", removed: map[string]bool{"nginx:amd64": true}},
+		{name: "unrecognized informational output", output: removalOutput("nginx") + "Unexpected transaction\n", removed: map[string]bool{"nginx:amd64": true}},
+		{name: "summary is not an action", output: "0 upgraded, 0 newly installed, 1 to remove and 0 not upgraded.\n", wantError: true},
+		{name: "inconsistent summary", output: removalOutput() + "Remv nginx [1]\n", wantError: true},
+		{name: "missing summary", output: "Remv nginx [1]\n", wantError: true},
+		{name: "malformed removal", output: removalOutput() + "Remv nginx nonsense\n", wantError: true},
+		{name: "missing removal identity", output: removalOutput() + "Remv\n", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			removed, err := parseRemoval([]byte(tc.output), state)
+			if (err != nil) != tc.wantError || !maps.Equal(removed, tc.removed) {
+				t.Fatalf("removed = %v, error = %v; want %v, error = %t", removed, err, tc.removed, tc.wantError)
+			}
+		})
+	}
+}
 
 func removalStateSteps(inventory, automatic string) []packageStep {
 	return []packageStep{
@@ -77,6 +112,29 @@ func TestRemovalTransactions(t *testing.T) {
 	}
 }
 
+func TestRemovalTransactionsWithInformationalOutput(t *testing.T) {
+	for _, notice := range []string{
+		"Use 'apt autoremove' to remove them.",
+		"Use 'sudo apt autoremove' to remove it.",
+		"Use 'sudo apt autoremove' to remove them.",
+		"Additional APT information",
+	} {
+		t.Run(notice, func(t *testing.T) {
+			inventory := packageInstalled("nginx", "1", "amd64") + packageInstalled("orphan", "1", "amd64")
+			steps := append(architectureSteps(), packageQuery("nginx", packageInstalled("nginx", "1", "amd64")))
+			steps = append(steps, approvedRemovalSteps(inventory, "orphan\n",
+				notice+"\n"+removalOutput("nginx"), removalOutput("nginx", "orphan")+notice+"\n", "nginx:amd64")...)
+			steps = append(steps, packageQuery("nginx", "nginx\tdeinstall ok config-files\t1\tamd64\n"))
+			desired := packageDesired("nginx")
+			desired.Ensure = "Absent"
+			actual, err := packageManagerFixture(t, steps...).Set(context.Background(), desired)
+			if err != nil || actual.State != "Absent" {
+				t.Fatalf("removal and cleanup with informational output: %+v, error %v", actual, err)
+			}
+		})
+	}
+}
+
 func TestRemovalRejectsReverseDependenciesBeforeCleanup(t *testing.T) {
 	for _, automatic := range []string{"", "nginx\n", "nginx\norphan\n"} {
 		t.Run(automatic, func(t *testing.T) {
@@ -112,11 +170,14 @@ func TestRemovalSimulationFailures(t *testing.T) {
 		err          error
 	}{
 		{"failed solver", "", packageExit(100)},
+		{"failed solver with partial output", "Use 'sudo apt autoremove' to remove them.\n", packageExit(100)},
+		{"failed solver with valid plan", removalOutput("nginx"), packageExit(100)},
 		{"empty output", "", nil},
 		{"summary only", "0 upgraded, 0 newly installed, 1 to remove and 0 not upgraded.\n", nil},
 		{"missing target", removalOutput(), nil},
 		{"install", removalOutput("nginx") + "Inst new-app (1 Debian [amd64])\n", nil},
 		{"upgrade", "1 upgraded, 0 newly installed, 1 to remove and 0 not upgraded.\nRemv nginx [1]\n", nil},
+		{"upgrade action", removalOutput("nginx") + "Inst other-app [1] (2 Debian [amd64])\n", nil},
 		{"configure", removalOutput("nginx") + "Conf other-app (1 Debian [amd64])\n", nil},
 		{"purge", "0 upgraded, 0 newly installed, 1 to remove and 0 not upgraded.\nPurg nginx [1]\n", nil},
 		{"malformed removal", "0 upgraded, 0 newly installed, 1 to remove and 0 not upgraded.\nRemv nginx nonsense\n", nil},
@@ -124,12 +185,14 @@ func TestRemovalSimulationFailures(t *testing.T) {
 		{"wrong version", strings.ReplaceAll(removalOutput("nginx"), "[1]", "[2]"), nil},
 		{"duplicate removal", removalOutput("nginx", "nginx"), nil},
 		{"duplicate summary", removalOutput("nginx") + "0 upgraded, 0 newly installed, 1 to remove and 0 not upgraded.\n", nil},
-		{"unknown output", removalOutput("nginx") + "Unexpected transaction\n", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			steps := removalStateSteps(packageInstalled("nginx", "1", "amd64"), "")
 			step := removalSimulation(false, tc.output, "nginx:amd64")
 			step.err = tc.err
+			if tc.err != nil {
+				step.stderr = "E: Unable to correct problems, you have held broken packages.\n"
+			}
 			steps = append(steps, step)
 			err := packageManagerFixture(t, steps...).validateRemoval(context.Background(), []string{"nginx:amd64"}, nil)
 			if err == nil {
@@ -137,8 +200,9 @@ func TestRemovalSimulationFailures(t *testing.T) {
 			}
 			if tc.err != nil {
 				var commandErr *PackageCommandError
-				if !errors.As(err, &commandErr) || commandErr.ExitCode() != 100 {
-					t.Fatalf("lost exit code: %v", err)
+				if !errors.As(err, &commandErr) || commandErr.ExitCode() != 100 ||
+					!errors.Is(err, tc.err) || commandErr.Stdout != tc.output || commandErr.Stderr != step.stderr {
+					t.Fatalf("lost APT failure diagnostics: %v", err)
 				}
 			}
 		})
@@ -284,6 +348,8 @@ func TestRemovalNativeAutomaticPackageNotices(t *testing.T) {
 	for _, notice := range []struct{ header, instruction string }{
 		{"The following package was automatically installed and is no longer required:", "Use 'apt autoremove' to remove it."},
 		{"The following packages were automatically installed and are no longer required:", "Use 'apt autoremove' to remove them."},
+		{"The following package was automatically installed and is no longer required:", "Use 'sudo apt autoremove' to remove it."},
+		{"The following packages were automatically installed and are no longer required:", "Use 'sudo apt autoremove' to remove them."},
 	} {
 		output := notice.header + "\n  old-orphan\n" + notice.instruction + "\n" + removalOutput("nginx")
 		if _, err := parseRemoval([]byte(output), state); err != nil {

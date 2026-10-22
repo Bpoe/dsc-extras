@@ -297,6 +297,26 @@ func TestPackagesSetNoOpDoesNotUpdate(t *testing.T) {
 	}
 }
 
+func TestPackagesInstallAutoremoveNotices(t *testing.T) {
+	for _, notice := range []string{
+		"Use 'apt autoremove' to remove them.",
+		"Use 'sudo apt autoremove' to remove it.",
+		"Use 'sudo apt autoremove' to remove them.",
+	} {
+		t.Run(notice, func(t *testing.T) {
+			install := packageInstall(false, "nginx")
+			install.stdout = "The following packages were automatically installed and are no longer required:\n" +
+				"  old-orphan\n" + notice + "\nInst nginx (1 Debian [amd64])\nConf nginx (1 Debian [amd64])\n"
+			steps := append(architectureSteps(), packageMissing("nginx"), install,
+				packageQuery("nginx", packageInstalled("nginx", "1", "amd64")))
+			actual, err := packageManagerFixture(t, steps...).Set(context.Background(), packageDesired("nginx"))
+			if err != nil || actual.State != "Present" {
+				t.Fatalf("installation with autoremove notice: %+v, error %v", actual, err)
+			}
+		})
+	}
+}
+
 func TestPackagesSetRemoveOnlyActive(t *testing.T) {
 	desired := packageDesired("zsh", "bash")
 	desired.Ensure = "Absent"
@@ -435,7 +455,8 @@ func TestPackagesSetPostVerification(t *testing.T) {
 
 func TestPackagesCommandFailurePreservesDiagnostics(t *testing.T) {
 	failure := packageInstall(false, "bash")
-	failure.stdout, failure.stderr, failure.err = "some output", "permission denied", packageExit(100)
+	failure.stdout = "Use 'sudo apt autoremove' to remove them.\nInst bash (1 Debian [amd64])\n"
+	failure.stderr, failure.err = "permission denied", packageExit(100)
 	steps := append(architectureSteps(), packageMissing("bash"), failure)
 	_, err := packageManagerFixture(t, steps...).Set(context.Background(), packageDesired("bash"))
 	var commandError *PackageCommandError

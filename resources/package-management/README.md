@@ -497,8 +497,11 @@ Removal never requests purge; residual configuration files are retained.
 Planning parses actual `Remv` operations, checks identities against the dpkg
 inventory and removal counts, and rejects unknown/ambiguous identities,
 unexpected installs/upgrades/downgrades/configuration/purge operations,
-malformed output, failed commands, or unavailable automatic-package status.
-Unknown APT output formats fail closed rather than being guessed.
+malformed action records, failed commands, or unavailable automatic-package status.
+Other informational output, including `Use 'sudo apt autoremove' to remove them.`,
+is ignored rather than matched against a message allowlist. Notices do not
+authorize removals; only action records and the existing cleanup safeguards do.
+The removal summary must still agree with the parsed operations.
 Both removal plans are repeated, and the complete dpkg inventory, automatic
 marks, and effective APT configuration are rechecked before execution.
 Detectable changes abort reconciliation without executing the removal.

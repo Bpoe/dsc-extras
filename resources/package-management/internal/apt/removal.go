@@ -124,8 +124,30 @@ var removalSummary = regexp.MustCompile(`^0 upgraded, 0 newly installed, ([0-9]+
 func parseRemoval(output []byte, state removalSnapshot) (map[string]bool, error) {
 	removed := map[string]bool{}
 	count, summaries := -1, 0
-	for _, line := range strings.Split(strings.TrimSuffix(string(output), "\n"), "\n") {
-		if match := removalOperation.FindStringSubmatch(line); match != nil {
+	for _, line := range strings.Split(string(output), "\n") {
+		if match := removalSummary.FindStringSubmatch(line); match != nil {
+			var err error
+			count, err = strconv.Atoi(match[1])
+			if err != nil {
+				return nil, err
+			}
+			summaries++
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		// APT's action records describe the plan; human-readable notices and
+		// summaries do not authorize package operations.
+		switch fields[0] {
+		case "Inst", "Conf", "Purg":
+			return nil, fmt.Errorf("cannot validate unexpected APT simulation operation %q", line)
+		case "Remv":
+			match := removalOperation.FindStringSubmatch(line)
+			if match == nil {
+				return nil, fmt.Errorf("cannot validate APT removal operation %q", line)
+			}
 			identity, err := removalIdentity(match[1], state.active)
 			if err != nil {
 				return nil, err
@@ -134,25 +156,6 @@ func parseRemoval(output []byte, state removalSnapshot) (map[string]bool, error)
 				return nil, fmt.Errorf("cannot validate APT removal operation %q", line)
 			}
 			removed[identity] = true
-		} else if match := removalSummary.FindStringSubmatch(line); match != nil {
-			var err error
-			count, err = strconv.Atoi(match[1])
-			if err != nil {
-				return nil, err
-			}
-			summaries++
-		} else if line == "" || strings.HasPrefix(line, "Reading package lists...") ||
-			strings.HasPrefix(line, "Building dependency tree...") ||
-			strings.HasPrefix(line, "Reading state information...") ||
-			line == "The following packages will be REMOVED:" ||
-			line == "The following package was automatically installed and is no longer required:" ||
-			line == "The following packages were automatically installed and are no longer required:" ||
-			line == "Use 'apt autoremove' to remove it." ||
-			line == "Use 'apt autoremove' to remove them." ||
-			strings.HasPrefix(line, "  ") {
-			continue
-		} else {
-			return nil, fmt.Errorf("cannot validate unexpected APT simulation output %q", line)
 		}
 	}
 	if summaries != 1 || count != len(removed) {

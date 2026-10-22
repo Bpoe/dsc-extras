@@ -105,7 +105,7 @@ func (e dscPackageExecutor) Execute(ctx context.Context, program string, args, e
 				}
 				break
 			}
-			output := fmt.Appendf(nil, "0 upgraded, 0 newly installed, %d to remove and 0 not upgraded.\n", count)
+			output := fmt.Appendf(nil, "Use 'sudo apt autoremove' to remove them.\n0 upgraded, 0 newly installed, %d to remove and 0 not upgraded.\n", count)
 			return append(output, operations...), nil, nil
 		}
 		log, err := os.OpenFile(filepath.Join(e.root, "transactions"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
