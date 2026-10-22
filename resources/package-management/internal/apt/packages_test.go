@@ -325,7 +325,7 @@ func TestPackagesSetRemoveOnlyActive(t *testing.T) {
 		packageQuery("zsh", "zsh\tdeinstall ok config-files\t2\tamd64\n"),
 	)
 	steps = append(steps, approvedRemovalSteps("bash\tinstall ok half-configured\t1\tamd64\nzsh\tdeinstall ok config-files\t2\tamd64\n",
-		removalOutput("bash"), "bash:amd64")...)
+		"", removalOutput("bash"), removalOutput("bash"), "bash:amd64")...)
 	steps = append(steps,
 		packageMissing("bash"),
 		packageQuery("zsh", "zsh\tdeinstall ok config-files\t2\tamd64\n"),
@@ -563,7 +563,7 @@ func TestPackagesForeignSelectorAndAbsentAll(t *testing.T) {
 		packageQuery("bash", packageInstalled("bash", "1", "all")),
 	)
 	steps = append(steps, approvedRemovalSteps(packageInstalled("bash", "1", "all"),
-		removalOutput("bash"), "bash:all")...)
+		"", removalOutput("bash"), removalOutput("bash"), "bash:all")...)
 	steps = append(steps,
 		packageMissing("bash"))
 	if _, err := packageManagerFixture(t, steps...).Set(context.Background(), desired); err != nil {

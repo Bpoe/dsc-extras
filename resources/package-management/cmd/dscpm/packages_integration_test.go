@@ -80,6 +80,10 @@ func (e dscPackageExecutor) Execute(ctx context.Context, program string, args, e
 			return fmt.Appendf(nil, "%s\tinstall ok installed\t%s\tamd64\n", name, version), nil, nil
 		}
 		return nil, []byte("dpkg-query: no packages found matching " + name + "\n"), missingPackageError{}
+	case "apt-mark":
+		if slices.Equal(args, []string{"showauto"}) {
+			return nil, nil, nil
+		}
 	case "apt-config":
 		if slices.Equal(args, []string{"dump"}) {
 			return []byte("APT::Get::Purge \"false\";\n"), nil, nil
@@ -177,9 +181,8 @@ func TestDSCPackageExecutorRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	if bytes.Count(before, []byte("\n")) != 1 || bytes.Contains(before, []byte("--simulate")) ||
-		bytes.Contains(before, []byte("--auto-remove")) ||
-		!bytes.Contains(before, []byte("APT::Get::AutomaticRemove=false --yes remove -- git:amd64")) {
-		t.Fatalf("expected only explicit removal in transaction log: %s", before)
+		!bytes.Contains(before, []byte("--auto-remove remove -- git:amd64")) {
+		t.Fatalf("expected only final auto-removal in transaction log: %s", before)
 	}
 	if _, err := manager.Set(t.Context(), desired); err != nil {
 		t.Fatal(err)
