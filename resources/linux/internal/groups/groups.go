@@ -363,7 +363,8 @@ func (m *Manager) Set(ctx context.Context, desired Group) (Group, error) {
 	if err != nil {
 		return Group{}, err
 	}
-	if len(differences(desired, actual, primary)) == 0 {
+	diff := differences(desired, actual, primary)
+	if len(diff) == 0 {
 		return actual, nil
 	}
 	if err := exclusionError(desired, actual, primary); err != nil {
@@ -374,6 +375,16 @@ func (m *Manager) Set(ctx context.Context, desired Group) (Group, error) {
 		proposed.GID = desired.GID
 		if err := exclusionError(desired, proposed, primary); err != nil {
 			return Group{}, err
+		}
+	}
+	if actual.Ensure == "Present" &&
+		(slices.Contains(diff, "members") || slices.Contains(diff, "includedMembers") || slices.Contains(diff, "excludedMembers")) {
+		split, err := m.hasSplitEntries(desired.Name)
+		if err != nil {
+			return Group{}, err
+		}
+		if split {
+			return Group{}, fmt.Errorf("split-group membership modification is unsupported for group %q: consolidate its /etc/group entries before changing membership", desired.Name)
 		}
 	}
 	if desired.Ensure == "Absent" {
@@ -463,4 +474,19 @@ func (m *Manager) Set(ctx context.Context, desired Group) (Group, error) {
 		return Group{}, fmt.Errorf("group %q did not converge; differing properties: %s", desired.Name, strings.Join(diff, ", "))
 	}
 	return after, nil
+}
+
+func (m *Manager) hasSplitEntries(name string) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(m.root, "etc", "group"))
+	if err != nil {
+		return false, fmt.Errorf("read local group database: %w", err)
+	}
+	entries := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		groupName, _, found := strings.Cut(line, ":")
+		if found && groupName == name {
+			entries++
+		}
+	}
+	return entries > 1, nil
 }

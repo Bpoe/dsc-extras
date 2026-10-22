@@ -73,10 +73,13 @@ for tool in groupadd groupmod groupdel gpasswd; do
     chmod 755 "/usr/local/bin/$tool"
 done
 groupadd -g 31000 dsclinux-base
+groupadd -g 31001 dsclinux-unrelated
 useradd -M -g dsclinux-base alice
 useradd -M -g dsclinux-base bob
 useradd -M -g dsclinux-base carol
 useradd -M -g dsclinux-base old
+useradd -M -g dsclinux-base unrelated
+gpasswd -a unrelated dsclinux-unrelated
 : > /tmp/dsclinux-mutations
 `, "exec", "-i", name, "sh", "-s")
 	invokeRaw := func(operation, input string) (string, error) {
@@ -211,6 +214,83 @@ useradd -M -g dsclinux-base old
 	command("", "exec", name, "userdel", "primaryuser")
 	invoke("set", `{"name":"dsclinux-dev","ensure":"Absent"}`)
 	assertNoop(`{"name":"dsclinux-dev","ensure":"Absent"}`)
+
+	command("", "exec", name, "groupadd", "-g", "31010", "dsclinux-split")
+	command(`set -eu
+sed -i '/^dsclinux-split:/d' /etc/group
+printf 'dsclinux-split:x:31010:alice\ndsclinux-split:x:31010:bob\n' >> /etc/group
+`, "exec", "-i", name, "sh", "-s")
+	splitEntries := func() []string {
+		t.Helper()
+		entries := []string{}
+		for _, line := range strings.Split(command("", "exec", name, "cat", "/etc/group"), "\n") {
+			if strings.HasPrefix(line, "dsclinux-split:") {
+				entries = append(entries, line)
+			}
+		}
+		return entries
+	}
+	otherGroupEntries := func() []string {
+		t.Helper()
+		entries := []string{}
+		for _, line := range strings.Split(command("", "exec", name, "cat", "/etc/group"), "\n") {
+			if line != "" && !strings.HasPrefix(line, "dsclinux-split:") {
+				entries = append(entries, line)
+			}
+		}
+		return entries
+	}
+	if got := invoke("get", `{"name":"dsclinux-split"}`).Members; got == nil ||
+		!slices.Equal(*got, []string{"alice", "bob"}) {
+		t.Fatalf("split Get members=%v; want [alice bob]", got)
+	}
+	assertNoop(`{"name":"dsclinux-split","includedMembers":["bob"]}`)
+	output, err := invokeRaw("test", `{"name":"dsclinux-split","excludedMembers":["alice"]}`)
+	if err != nil {
+		t.Fatalf("Test split membership: %v\n%s", err, output)
+	}
+	var testState struct {
+		InDesiredState bool `json:"_inDesiredState"`
+	}
+	var testDiff []string
+	decoder := json.NewDecoder(strings.NewReader(output))
+	if err := decoder.Decode(&testState); err != nil {
+		t.Fatalf("decode split Test state: %v", err)
+	}
+	if err := decoder.Decode(&testDiff); err != nil ||
+		testState.InDesiredState || !slices.Equal(testDiff, []string{"excludedMembers"}) {
+		t.Fatalf("split Test state=%+v diff=%v err=%v", testState, testDiff, err)
+	}
+
+	beforeEntries := splitEntries()
+	probe := command("", "exec", name, "sh", "-c", `before=$(grep '^dsclinux-split:' /etc/group)
+if gpasswd -a carol dsclinux-split >/tmp/gpasswd-split.log 2>&1; then
+    echo "gpasswd unexpectedly succeeded on split group"
+    exit 1
+fi
+cat /tmp/gpasswd-split.log
+after=$(grep '^dsclinux-split:' /etc/group)
+[ "$before" = "$after" ]`)
+	if !strings.Contains(probe, "Multiple entries named") || !slices.Equal(splitEntries(), beforeEntries) {
+		t.Fatalf("native gpasswd split-group behavior changed: %s; entries=%v", probe, splitEntries())
+	}
+	mutationBefore := mutations()
+	unrelatedGroupsBefore := otherGroupEntries()
+	passwdBefore := command("", "exec", name, "cat", "/etc/passwd")
+	for _, input := range []string{
+		`{"name":"dsclinux-split","includedMembers":["carol"]}`,
+		`{"name":"dsclinux-split","excludedMembers":["alice"]}`,
+		`{"name":"dsclinux-split","members":["alice","carol"]}`,
+		`{"name":"dsclinux-split","members":[]}`,
+	} {
+		expectFailure(input, "split-group membership modification is unsupported")
+		if !slices.Equal(splitEntries(), beforeEntries) ||
+			!slices.Equal(otherGroupEntries(), unrelatedGroupsBefore) ||
+			command("", "exec", name, "cat", "/etc/passwd") != passwdBefore ||
+			mutations() != mutationBefore {
+			t.Fatalf("rejected split-group mutation changed account state: %s", input)
+		}
+	}
 	for _, user := range []string{"alice", "bob", "carol", "old"} {
 		command("", "exec", name, "getent", "passwd", user)
 	}

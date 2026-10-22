@@ -194,7 +194,6 @@ func TestSetReconciliation(t *testing.T) {
 		{"create members", "", `{"name":"dev","members":["alice"]}`, []string{"groupadd -- dev", "gpasswd -a alice dev"}, []string{"alice"}},
 		{"unknown properties", "dev:x:2000:old\n", `{"name":"dev","future":{"ignored":true}}`, nil, []string{"old"}},
 		{"split compliant", "dev:x:2000:alice,bob\ndev:x:2000:bob,carol\n", `{"name":"dev","members":["carol","alice","bob"]}`, nil, []string{"alice", "bob", "carol"}},
-		{"split reconcile", "dev:x:2000:alice\ndev:x:2000:bob\n", `{"name":"dev","members":["carol","bob"]}`, []string{"gpasswd -a carol dev", "gpasswd -d alice dev"}, []string{"bob", "carol"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			m, f := fixture(t, test.before)
@@ -233,6 +232,31 @@ func TestSetReconciliation(t *testing.T) {
 			count := len(f.mutations)
 			if _, err := m.Set(t.Context(), want); err != nil || len(f.mutations) != count {
 				t.Fatalf("repeated Set not idempotent: %v, %v", f.mutations, err)
+			}
+		})
+	}
+}
+
+func TestSplitMembershipMutationsRejected(t *testing.T) {
+	for _, input := range []string{
+		`{"name":"dev","includedMembers":["carol"]}`,
+		`{"name":"dev","excludedMembers":["alice"]}`,
+		`{"name":"dev","members":["alice","carol"]}`,
+		`{"name":"dev","members":[]}`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			m, f := fixture(t, "dev:x:2000:alice\ndev:x:2000:bob\n")
+			before, err := os.ReadFile(filepath.Join(m.root, "etc", "group"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := m.Set(t.Context(), desired(t, input)); err == nil ||
+				!strings.Contains(err.Error(), "split-group membership modification is unsupported") {
+				t.Fatalf("expected unsupported split-group mutation error, got %v", err)
+			}
+			after, err := os.ReadFile(filepath.Join(m.root, "etc", "group"))
+			if err != nil || !slices.Equal(before, after) || len(f.mutations) != 0 {
+				t.Fatalf("rejected split-group mutation changed state: %v, %v", f.mutations, err)
 			}
 		})
 	}

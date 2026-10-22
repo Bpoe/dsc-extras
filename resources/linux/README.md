@@ -261,7 +261,10 @@ group; the resource does not force deletion or reassign users.
 `/etc/group` is authoritative for local existence and supplementary membership.
 Split entries created with `MAX_MEMBERS_PER_GROUP` are combined when their name
 and GID agree, with sorted, deduplicated observed membership. Same-name entries
-with different GIDs are errors. Desired arrays still reject duplicates.
+with different GIDs are errors. Desired arrays still reject duplicates. Get and
+Test support split groups, but Set rejects a requested membership change when
+the group has multiple entries: native `gpasswd` cannot safely reconcile that
+representation. Consolidate the entries before managing their membership.
 
 `getent` performs NSS-aware identity lookups, including LDAP/NIS-backed users.
 An external-only group is locally Absent: Get reports Absent, Test compares
