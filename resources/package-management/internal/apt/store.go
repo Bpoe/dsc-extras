@@ -141,9 +141,6 @@ func (s Store) matches(documents []*AptDocument, selector Repository) []reposito
 				return repositoryURI(entry.URI) != repositoryURI(selector.URI) || entry.Suite != selector.Suite
 			})
 		}
-		if len(namedEntries) == 0 {
-			return nil
-		}
 	}
 	var found []repositoryMatch
 	for _, document := range documents {
@@ -206,6 +203,10 @@ func (s Store) observe(selector Repository, documents []*AptDocument, repair boo
 	found := s.matches(documents, selector)
 	for _, document := range documents {
 		if document.parseErr != nil {
+			if len(found) != 0 {
+				return actual, found, fmt.Errorf("cannot reconcile malformed named source %s while a matching repository exists in %s; repair or remove the malformed source explicitly",
+					document.Path, found[0].document.Path)
+			}
 			actual = Repository{Name: selector.Name, Ensure: "Present"}
 		}
 	}

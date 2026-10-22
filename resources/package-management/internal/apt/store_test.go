@@ -773,6 +773,64 @@ func TestExistingDeclaredPathsAreReconciled(t *testing.T) {
 	}
 }
 
+func TestEmptyNamedSourceDiscoversExistingRepository(t *testing.T) {
+	for _, extension := range []string{".sources", ".list"} {
+		for _, keyName := range []string{"docker", "vendor"} {
+			for _, drift := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/key=%s/drift=%t", extension, keyName, drift), func(t *testing.T) {
+					store := newTestStore(t)
+					desired := validDesired()
+					desired.Name = "docker"
+					named := fixtureFile(t, store, "/etc/apt/sources.list.d/docker"+extension, "")
+					writePublicKeyring(t, store, keyName, desired.SigningKey)
+					existing := desired
+					if drift {
+						existing.Components = []string{"main"}
+					}
+					vendor := fixtureFile(t, store, "/etc/apt/sources.list.d/vendor.sources",
+						string(serializeDeb822(existing, store.keyringReference(keyName))))
+					before := snapshot(t, store.Root)
+					if _, err := store.Set(desired); err != nil {
+						t.Errorf("Set must reconcile the existing vendor source: %v", err)
+					}
+					after := snapshot(t, store.Root)
+					if !drift {
+						assertUnchanged(t, before, after)
+					} else {
+						delete(before, vendor)
+						delete(after, vendor)
+						delete(before, filepath.Dir(vendor))
+						delete(after, filepath.Dir(vendor))
+						assertUnchanged(t, before, after)
+					}
+					data, err := os.ReadFile(named)
+					if err != nil || len(data) != 0 {
+						t.Fatalf("Set populated the empty named file: %q, %v", data, err)
+					}
+					assertCompliantNoOp(t, store, desired)
+				})
+			}
+		}
+	}
+}
+
+func TestMalformedNamedSourceAndExistingRepositoryFailBeforeWrites(t *testing.T) {
+	store := newTestStore(t)
+	desired := validDesired()
+	writeFile(t, store.sourcePath(desired.Name), "not a Deb822 source\n")
+	writePublicKeyring(t, store, desired.Name, desired.SigningKey)
+	fixtureFile(t, store, "/etc/apt/sources.list.d/vendor.sources",
+		string(serializeDeb822(desired, store.keyringReference(desired.Name))))
+	before := snapshot(t, store.Root)
+	if _, _, err := store.Test(desired); err == nil || !strings.Contains(err.Error(), "malformed named source") {
+		t.Errorf("Test must identify the ambiguous malformed named source: %v", err)
+	}
+	if _, err := store.Set(desired); err == nil || !strings.Contains(err.Error(), "malformed named source") {
+		t.Errorf("Set must reject an ambiguous malformed named source: %v", err)
+	}
+	assertUnchanged(t, before, snapshot(t, store.Root))
+}
+
 func TestConcurrentEditsAreRejectedBeforeWrites(t *testing.T) {
 	store := newTestStore(t)
 	desired := validDesired()

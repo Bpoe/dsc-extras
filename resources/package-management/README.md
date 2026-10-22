@@ -53,9 +53,9 @@ Every operation requires `name`, `uri`, and `suite`. The resource first selects
 does not exist. A single binary repository in that file is reconciled in place,
 even when its URL or suite differs. For files containing multiple repositories,
 URI and suite select the entry to manage; ambiguous edits are rejected.
-If neither named file exists, discovery by URI and suite preserves existing
-configurations in other files instead of creating duplicates. A trailing URI
-slash is equivalent, except in URIs containing query strings.
+If the named file does not identify the repository, discovery by URI and suite
+preserves existing configurations in other files instead of creating duplicates.
+A trailing URI slash is equivalent, except in URIs containing query strings.
 
 Discovery reads `/etc/apt/sources.list`, `/etc/apt/sources.list.d/*.list`, and
 `/etc/apt/sources.list.d/*.sources`. Multiple lines/stanzas and Deb822
@@ -109,7 +109,9 @@ split into individual stanzas with the other repositories' properties retained.
 Unchanged documents and keyrings are never serialized. A malformed named source
 is noncompliant and can be replaced by `Set`; `Get` reports a parsing error when
 its actual properties cannot be read. Malformed unrelated sources still produce
-errors and are not replaced.
+errors and are not replaced. A malformed named source that overlaps a matching
+repository elsewhere is rejected before any writes rather than creating a
+duplicate definition.
 
 A missing repository creates:
 
