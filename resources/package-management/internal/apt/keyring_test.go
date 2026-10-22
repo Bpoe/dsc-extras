@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -54,19 +55,11 @@ func TestMultipleKeyringsAndFingerprintTrustSelections(t *testing.T) {
 
 func otherTestKey(t *testing.T) string {
 	t.Helper()
-	entity, err := openpgp.NewEntity("second synthetic test", "", "", nil)
+	key, err := os.ReadFile(filepath.Join("testdata", "docker.asc"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var binary bytes.Buffer
-	if err := entity.Serialize(&binary); err != nil {
-		t.Fatal(err)
-	}
-	armored, err := armoredKeyring(binary.Bytes())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return armored
+	return string(key)
 }
 
 func TestValidateSigningKeyRejectsSecretKeyMaterial(t *testing.T) {

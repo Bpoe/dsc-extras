@@ -55,7 +55,7 @@ func ValidateSelector(repository Repository) error {
 		return err
 	}
 	if err := validateURI(repository.URI); err != nil || !suitePattern.MatchString(repository.Suite) {
-		return errors.New("uri and suite are required to identify a logical repository; name only selects filenames for new repositories")
+		return errors.New("uri and suite are required repository properties")
 	}
 	return nil
 }

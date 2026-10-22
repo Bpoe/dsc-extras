@@ -45,7 +45,7 @@ func (s Store) keyringPath(name string) string {
 func (s Store) readDocument(path string) (*AptDocument, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("inspect APT source %q: %w", path, err)
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("APT source %q is not a regular file", path)
@@ -56,13 +56,18 @@ func (s Store) readDocument(path string) (*AptDocument, error) {
 	}
 	d, err := parseDocument(path, data)
 	if err != nil {
-		return nil, err
+		return &AptDocument{Path: path, OriginalContents: data, Format: AptFormat(filepath.Ext(path)),
+			info: info, store: s, parseErr: err}, err
 	}
 	d.info, d.store = info, s
 	return d, nil
 }
 
 func (s Store) Discover() ([]*AptDocument, error) {
+	return s.discover("")
+}
+
+func (s Store) discover(repairPath string) ([]*AptDocument, error) {
 	paths := []string{}
 	main := filepath.Join(s.Root, "etc", "apt", "sources.list")
 	if _, err := os.Lstat(main); err == nil {
@@ -92,9 +97,12 @@ func (s Store) Discover() ([]*AptDocument, error) {
 		}
 	}
 	var documents []*AptDocument
+	if repairPath != "" && !slices.Contains(paths, repairPath) {
+		repairPath = strings.TrimSuffix(repairPath, ".sources") + ".list"
+	}
 	for _, path := range paths {
 		d, err := s.readDocument(path)
-		if err != nil {
+		if err != nil && (d == nil || path != repairPath) {
 			return nil, err
 		}
 		documents = append(documents, d)
@@ -107,11 +115,41 @@ type repositoryMatch struct {
 	index    int
 }
 
-func matches(documents []*AptDocument, selector Repository) []repositoryMatch {
+func (s Store) namedDocument(documents []*AptDocument, name string) *AptDocument {
+	for _, path := range []string{s.sourcePath(name), strings.TrimSuffix(s.sourcePath(name), ".sources") + ".list"} {
+		for _, document := range documents {
+			if document.Path == path {
+				return document
+			}
+		}
+	}
+	return nil
+}
+
+func (s Store) matches(documents []*AptDocument, selector Repository) []repositoryMatch {
+	named := s.namedDocument(documents, selector.Name)
+	var namedEntries []int
+	if named != nil {
+		for index, entry := range named.Entries {
+			if entry.Type == "deb" {
+				namedEntries = append(namedEntries, index)
+			}
+		}
+		if len(namedEntries) != 1 {
+			namedEntries = slices.DeleteFunc(namedEntries, func(index int) bool {
+				entry := named.Entries[index]
+				return repositoryURI(entry.URI) != repositoryURI(selector.URI) || entry.Suite != selector.Suite
+			})
+		}
+		if len(namedEntries) == 0 {
+			return nil
+		}
+	}
 	var found []repositoryMatch
 	for _, document := range documents {
 		for index, entry := range document.Entries {
-			if entry.Type == "deb" && repositoryURI(entry.URI) == repositoryURI(selector.URI) && entry.Suite == selector.Suite {
+			if entry.Type == "deb" && (document == named && slices.Contains(namedEntries, index) ||
+				document != named && repositoryURI(entry.URI) == repositoryURI(selector.URI) && entry.Suite == selector.Suite) {
 				found = append(found, repositoryMatch{document, index})
 			}
 		}
@@ -163,9 +201,14 @@ func checkOptions(entry AptRepository) error {
 	return nil
 }
 
-func (s Store) observe(selector Repository, documents []*AptDocument) (Repository, []repositoryMatch, error) {
+func (s Store) observe(selector Repository, documents []*AptDocument, repair bool) (Repository, []repositoryMatch, error) {
 	actual := Repository{Name: selector.Name, URI: selector.URI, Suite: selector.Suite, Ensure: "Absent"}
-	found := matches(documents, selector)
+	found := s.matches(documents, selector)
+	for _, document := range documents {
+		if document.parseErr != nil {
+			actual = Repository{Name: selector.Name, Ensure: "Present"}
+		}
+	}
 	var firstMaterial []byte
 	for i, match := range found {
 		entry := match.document.Entries[match.index]
@@ -177,7 +220,8 @@ func (s Store) observe(selector Repository, documents []*AptDocument) (Repositor
 			return actual, found, fmt.Errorf("%s: %w", match.document.Path, err)
 		}
 		material, err := s.signingMaterial(entry.Signing)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+		var invalidKey *keyringContentError
+		if err != nil && !errors.Is(err, os.ErrNotExist) && !(repair && errors.As(err, &invalidKey)) {
 			return actual, found, err
 		}
 		if i == 0 {
@@ -242,7 +286,7 @@ func (s Store) Get(selector Repository) (Repository, error) {
 	if err != nil {
 		return Repository{}, err
 	}
-	actual, _, err := s.observe(selector, documents)
+	actual, _, err := s.observe(selector, documents, false)
 	return actual, err
 }
 
@@ -250,9 +294,20 @@ func (s Store) Test(desired Repository) (Repository, []string, error) {
 	if err := ValidateDesired(&desired); err != nil {
 		return Repository{}, nil, err
 	}
-	actual, err := s.Get(desired)
+	documents, err := s.discover(s.sourcePath(desired.Name))
+	if err != nil {
+		return Repository{}, nil, err
+	}
+	actual, _, err := s.observe(desired, documents, true)
 	if err != nil {
 		return actual, nil, err
+	}
+	for _, document := range documents {
+		if document.parseErr != nil {
+			if err := s.checkWrite(document.Path, document.OriginalContents, document.info, false); err != nil {
+				return actual, nil, err
+			}
+		}
 	}
 	return actual, DifferingProperties(desired, actual), nil
 }
@@ -261,11 +316,11 @@ func (s Store) Set(desired Repository) (Repository, error) {
 	if err := ValidateDesired(&desired); err != nil {
 		return Repository{}, err
 	}
-	documents, err := s.Discover()
+	documents, err := s.discover(s.sourcePath(desired.Name))
 	if err != nil {
 		return Repository{}, err
 	}
-	actual, found, err := s.observe(desired, documents)
+	actual, found, err := s.observe(desired, documents, true)
 	if err != nil {
 		return Repository{}, err
 	}
@@ -278,21 +333,49 @@ func (s Store) Set(desired Repository) (Repository, error) {
 	var document *AptDocument
 	var key *AptKeyring
 	if len(found) == 0 {
-		material, err := signingKeyBinary(desired.SigningKey)
+		document = s.namedDocument(documents, desired.Name)
+		path := s.sourcePath(desired.Name)
+		if document != nil {
+			if len(document.Entries) != 0 {
+				return Repository{}, fmt.Errorf("cannot select a unique deb entry in %s; specify the URI and suite of the entry to manage", document.Path)
+			}
+			path = document.Path
+		}
+		data := []byte{}
+		if desired.Ensure != "Absent" {
+			material, err := signingKeyBinary(desired.SigningKey)
+			if err != nil {
+				return Repository{}, err
+			}
+			key, err = s.prepareKey(desired.Name, material, documents, nil)
+			if err != nil {
+				return Repository{}, err
+			}
+			source := serializeDeb822(desired, key.Reference)
+			if filepath.Ext(path) == ".list" {
+				text, err := serializeList(AptRepository{Type: "deb", URI: desired.URI, Suite: desired.Suite,
+					Components: desired.Components, Architectures: desired.Architectures, Enabled: desired.enabled(),
+					Signing: SigningConfiguration{Keyrings: []string{key.Reference}}}, "", "\n")
+				if err != nil {
+					return Repository{}, err
+				}
+				source = []byte(text)
+			}
+			data = append([]byte(managedMarker(desired.Name)), source...)
+		}
+		planned, err := parseDocument(path, data)
 		if err != nil {
 			return Repository{}, err
 		}
-		key, err = s.prepareKey(desired.Name, material, false, documents, nil)
-		if err != nil {
-			return Repository{}, err
+		planned.store = s
+		if document == nil {
+			document = planned
+			document.create = true
+			documents = append(documents, document)
+		} else {
+			planned.info, planned.OriginalContents, planned.replacement = document.info, document.OriginalContents, data
+			*document = *planned
 		}
-		data := append([]byte(managedMarker(desired.Name)), serializeDeb822(desired, key.Reference)...)
-		document, err = parseDocument(s.sourcePath(desired.Name), data)
-		if err != nil {
-			return Repository{}, err
-		}
-		document.store, document.create = s, true
-		documents = append(documents, document)
 	} else {
 		match := found[0]
 		document = match.document
@@ -305,10 +388,10 @@ func (s Store) Set(desired Repository) (Repository, error) {
 		if desired.Ensure == "Absent" {
 			entry.removed = true
 		} else {
+			entry.URI, entry.Suite = desired.URI, desired.Suite
 			if !equalStrings(actual.Architectures, desired.Architectures) {
-				if entry.Options["architectures-add"] != "" || entry.Options["architectures-remove"] != "" {
-					return Repository{}, errors.New("cannot change architecture restrictions with modifiers; simplify Architectures explicitly first")
-				}
+				delete(entry.Options, "architectures-add")
+				delete(entry.Options, "architectures-remove")
 				entry.Architectures = slices.Clone(desired.Architectures)
 			}
 			if !equalStrings(actual.Components, desired.Components) {
@@ -320,21 +403,15 @@ func (s Store) Set(desired Repository) (Repository, error) {
 				return Repository{}, err
 			}
 			current, err := s.signingMaterial(entry.Signing)
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
+			var invalidKey *keyringContentError
+			if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.As(err, &invalidKey) {
 				return Repository{}, err
 			}
 			if !bytes.Equal(current, material) {
 				if entry.Signing.InlineKey != "" {
 					entry.Signing.InlineKey = desired.SigningKey
 				} else {
-					unrestricted := len(entry.Signing.Keyrings) == 0 && len(entry.Signing.Fingerprints) == 0
-					owned := bytes.HasPrefix(document.OriginalContents, []byte(managedMarker(desired.Name))) &&
-						equalStrings(entry.Signing.Keyrings, []string{s.keyringReference(desired.Name)}) &&
-						len(entry.Signing.Fingerprints) == 0
-					if !unrestricted && !owned {
-						return Repository{}, fmt.Errorf("signing key for %s is externally managed; provision the intended key explicitly rather than overwriting its trust material", document.Path)
-					}
-					key, err = s.prepareKey(desired.Name, material, owned, documents, &match)
+					key, err = s.prepareKey(desired.Name, material, documents, &match)
 					if err != nil {
 						return Repository{}, err
 					}
@@ -395,17 +472,18 @@ func checkPlannedTrust(documents []*AptDocument, desired Repository) error {
 	return nil
 }
 
-func (s Store) prepareKey(name string, material []byte, owned bool, documents []*AptDocument, target *repositoryMatch) (*AptKeyring, error) {
+func (s Store) prepareKey(name string, material []byte, documents []*AptDocument, target *repositoryMatch) (*AptKeyring, error) {
 	reference := s.keyringReference(name)
 	key, err := s.ReadKeyring(reference)
 	if errors.Is(err, os.ErrNotExist) {
 		key = &AptKeyring{Reference: reference, Path: s.keyringPath(name), Format: BinaryKeyring, store: s, create: true}
 	} else if err != nil {
-		return nil, err
+		var invalidKey *keyringContentError
+		if !errors.As(err, &invalidKey) {
+			return nil, err
+		}
 	} else if bytes.Equal(key.Material, material) {
 		return key, nil
-	} else if !owned {
-		return nil, fmt.Errorf("keyring %s already exists with different material; choose a different name or reconcile its owner", reference)
 	}
 	for _, document := range documents {
 		for index, entry := range document.Entries {
@@ -436,6 +514,6 @@ func (s Store) prepareKey(name string, material []byte, owned bool, documents []
 			}
 		}
 	}
-	key.Material, key.allowChange = material, owned
+	key.Material = material
 	return key, nil
 }

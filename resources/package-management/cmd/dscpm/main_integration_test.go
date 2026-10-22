@@ -62,6 +62,12 @@ func TestDSCAvailabilityPolicy(t *testing.T) {
 }
 
 func testDSCStateAndDiffIntegration(t *testing.T, manifestName string) {
+	dsc, resourceType := prepareDSCResource(t, manifestName)
+	testDSCOperations(t, dsc, resourceType)
+}
+
+func prepareDSCResource(t *testing.T, manifestName string) (string, string) {
+	t.Helper()
 	dsc, err := exec.LookPath("dsc")
 	if err != nil {
 		if os.Getenv("DSCPM_REQUIRE_DSC") == "1" {
@@ -119,6 +125,10 @@ func testDSCStateAndDiffIntegration(t *testing.T, manifestName string) {
 	if output, err := list.CombinedOutput(); err != nil || !bytes.Contains(output, []byte(resourceType)) {
 		t.Fatalf("DSC could not discover %s: %v\n%s", resourceType, err, output)
 	}
+	return dsc, resourceType
+}
+
+func testDSCOperations(t *testing.T, dsc, resourceType string) {
 	otherKey := differentSigningKey(t)
 	for _, test := range []struct {
 		name   string
@@ -139,6 +149,7 @@ func testDSCStateAndDiffIntegration(t *testing.T, manifestName string) {
 			if test.change != nil {
 				test.change(&desired)
 			}
+
 			t.Setenv("DSCAPT_TEST_ROOT", store.Root)
 			input, err := json.Marshal(desired)
 			if err != nil {
@@ -179,19 +190,11 @@ func testDSCStateAndDiffIntegration(t *testing.T, manifestName string) {
 				command := exec.CommandContext(ctx, dsc, "resource", operation, "--resource", resourceType,
 					"--file", "-", "--output-format", "json")
 				command.Stdin = bytes.NewReader(input)
-				output, err := command.CombinedOutput()
-				if operation == "set" && test.name == "different key" {
-					if err == nil || !bytes.Contains(output, []byte("externally managed")) {
-						t.Fatalf("DSC Set must reject external key rotation: %v\n%s", err, output)
-					}
-					observed, getErr := store.Get(desired)
-					if getErr != nil || !reflect.DeepEqual(actual, observed) {
-						t.Fatalf("rejected DSC Set changed actual state: %+v (%v)", observed, getErr)
-					}
-					continue
-				}
+				var stderr strings.Builder
+				command.Stderr = &stderr
+				output, err := command.Output()
 				if err != nil {
-					t.Fatalf("DSC resource %s failed: %v\n%s", operation, err, output)
+					t.Fatalf("DSC resource %s failed: %v\n%s\n%s", operation, err, output, stderr.String())
 				}
 				if operation == "get" {
 					var result struct {
@@ -212,5 +215,114 @@ func testDSCStateAndDiffIntegration(t *testing.T, manifestName string) {
 				}
 			}
 		})
+	}
+}
+
+func TestDSCConfigCorrectsDockerRepositoryAndConverges(t *testing.T) {
+	dsc, resourceType := prepareDSCResource(t, "aptRepositories.dsc.resource.json")
+	store := makeStore(t)
+	t.Setenv("DSCAPT_TEST_ROOT", store.Root)
+	key, err := os.ReadFile(filepath.Join("..", "..", "internal", "apt", "testdata", "docker.asc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	docker := apt.Repository{Name: "docker", Ensure: "Present", URI: "https://download.docker.com/linux/debian",
+		Suite: "noble", Components: []string{"stable"}, Architectures: []string{"amd64"}, SigningKey: string(key)}
+	other := apt.Repository{Name: "other", Ensure: "Present", URI: "https://unrelated.example", Suite: "stable",
+		Components: []string{"main"}, SigningKey: testPublicKey}
+	configSet := func() {
+		t.Helper()
+		config := map[string]any{
+			"$schema": "https://aka.ms/dsc/schemas/v3/bundled/config/document.json",
+			"resources": []map[string]any{
+				{"name": "Docker", "type": resourceType, "properties": docker},
+				{"name": "Other", "type": resourceType, "properties": other},
+			},
+		}
+		input, err := json.Marshal(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		command := exec.CommandContext(ctx, dsc, "config", "set", "--file", "-", "--output-format", "json")
+		command.Stdin = bytes.NewReader(input)
+		var stderr strings.Builder
+		command.Stderr = &stderr
+		output, err := command.Output()
+		if err != nil {
+			t.Fatalf("dsc config set: %v\n%s\n%s", err, output, stderr.String())
+		}
+		var result struct {
+			HadErrors bool              `json:"hadErrors"`
+			Results   []json.RawMessage `json:"results"`
+		}
+		if err := json.Unmarshal(output, &result); err != nil || result.HadErrors || len(result.Results) != 2 {
+			t.Fatalf("configuration did not apply both repositories: %s (%v)", output, err)
+		}
+	}
+	sourcePath := filepath.Join(store.Root, "etc", "apt", "sources.list.d", "docker.sources")
+	otherPath := filepath.Join(store.Root, "etc", "apt", "sources.list.d", "other.sources")
+	configSet()
+	initial, err := os.ReadFile(sourcePath)
+	if err != nil || !bytes.Contains(initial, []byte("URIs: "+docker.URI+"\nSuites: noble\n")) {
+		t.Fatalf("incorrect initial Docker definition was not reproduced: %s (%v)", initial, err)
+	}
+	otherBefore, err := os.Stat(otherPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	docker.URI = "https://download.docker.com/linux/ubuntu"
+	docker.Suite = "jammy"
+	before, differences, err := store.Test(docker)
+	if err != nil || before.URI != "https://download.docker.com/linux/debian" ||
+		!slices.Equal(differences, []string{"uri", "suite"}) {
+		t.Fatalf("corrected configuration must detect actual drift: %+v, %v, %v", before, differences, err)
+	}
+	configSet()
+	corrected, err := os.ReadFile(sourcePath)
+	if err != nil || !bytes.Contains(corrected, []byte("URIs: "+docker.URI+"\nSuites: jammy\n")) {
+		t.Fatalf("Docker definition was not corrected: %s (%v)", corrected, err)
+	}
+	input, err := json.Marshal(docker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, output, stderr := call(t, store, "test", string(input))
+	if code != 0 || stderr != "" {
+		t.Fatalf("resource test failed: %d, %s", code, stderr)
+	}
+	state, differences := decodeTestOutput(t, output)
+	if !state.InDesiredState || len(differences) != 0 {
+		t.Fatalf("corrected Docker repository is not compliant: %s", output)
+	}
+	paths := []string{sourcePath, otherPath,
+		filepath.Join(store.Root, "etc", "apt", "keyrings", "docker.gpg"),
+		filepath.Join(store.Root, "etc", "apt", "keyrings", "other.gpg")}
+	infos, contents := map[string]os.FileInfo{}, map[string][]byte{}
+	for _, path := range paths {
+		infos[path], err = os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents[path], err = os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !os.SameFile(otherBefore, infos[otherPath]) || !otherBefore.ModTime().Equal(infos[otherPath].ModTime()) {
+		t.Fatal("correcting Docker changed the unrelated repository")
+	}
+	configSet()
+	for _, path := range paths {
+		after, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(contents[path], data) || !os.SameFile(infos[path], after) ||
+			!infos[path].ModTime().Equal(after.ModTime()) || infos[path].Mode() != after.Mode() {
+			t.Fatalf("repeated config set rewrote %s: %v", path, err)
+		}
 	}
 }

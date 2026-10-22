@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -165,6 +166,11 @@ func TestMissingRepositoryCreatesDeb822AndManagedBinaryKey(t *testing.T) {
 	if actual, err := store.Get(desired); err != nil || actual.Ensure != "Absent" {
 		t.Fatalf("Get = (%+v, %v)", actual, err)
 	}
+	before := snapshot(t, store.Root)
+	if _, differences, err := store.Test(desired); err != nil || !slices.Equal(differences, []string{"ensure"}) {
+		t.Fatalf("Test missing = (%v, %v)", differences, err)
+	}
+	assertUnchanged(t, before, snapshot(t, store.Root))
 	if _, err := store.Set(desired); err != nil {
 		t.Fatal(err)
 	}
@@ -359,18 +365,6 @@ func TestUnsafeChangesAndConflictsDoNotWrite(t *testing.T) {
 		setup     func(*testing.T, Store, *Repository)
 		errorText string
 	}{
-		{"package source", func(t *testing.T, s Store, r *Repository) {
-			fixtureFile(t, s, "/var/lib/dpkg/info/vendor.list", "/etc/apt/sources.list.d/example.sources\n")
-			r.Components = []string{"main"}
-		}, "owned by Debian package"},
-		{"package key", func(t *testing.T, s Store, r *Repository) {
-			fixtureFile(t, s, "/var/lib/dpkg/info/vendor.list", s.keyringReference(r.Name)+"\n")
-			r.SigningKey = otherTestKey(t)
-		}, "owned by Debian package"},
-		{"package source key-only change", func(t *testing.T, s Store, r *Repository) {
-			fixtureFile(t, s, "/var/lib/dpkg/info/vendor.list", "/etc/apt/sources.list.d/example.sources\n")
-			r.SigningKey = otherTestKey(t)
-		}, "owned by Debian package"},
 		{"shared managed key", func(t *testing.T, s Store, r *Repository) {
 			fixtureFile(t, s, "/etc/apt/sources.list", "deb [signed-by="+s.keyringReference(r.Name)+"] https://other.example stable main\n")
 			r.SigningKey = otherTestKey(t)
@@ -452,12 +446,11 @@ func TestFormattedDeb822AndArchitectureModifiersRemainUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertCompliantNoOp(t, store, desired)
-	before := snapshot(t, store.Root)
 	desired.Architectures = []string{"arm64"}
-	if _, err := store.Set(desired); err == nil || !strings.Contains(err.Error(), "modifiers") {
-		t.Fatalf("unsafe architecture edit not rejected: %v", err)
+	if _, err := store.Set(desired); err != nil {
+		t.Fatal(err)
 	}
-	assertUnchanged(t, before, snapshot(t, store.Root))
+	assertCompliantNoOp(t, store, desired)
 }
 
 func TestSymlinkedPathsAreReadOnly(t *testing.T) {
@@ -676,7 +669,7 @@ func TestUnsignedSourceCanBeRestrictedWithoutAddingDuplicate(t *testing.T) {
 	assertCompliantNoOp(t, store, desired)
 }
 
-func TestExternalKeyRotationIsRejectedButExclusiveManagedKeyCanRotate(t *testing.T) {
+func TestExternalAndManagedKeysCanRotateWithoutOwnershipMarkers(t *testing.T) {
 	for _, managed := range []bool{false, true} {
 		t.Run(fmt.Sprint(managed), func(t *testing.T) {
 			store := newTestStore(t)
@@ -689,21 +682,13 @@ func TestExternalKeyRotationIsRejectedButExclusiveManagedKeyCanRotate(t *testing
 			}
 			before := snapshot(t, store.Root)
 			desired.SigningKey = otherTestKey(t)
-			_, err := store.Set(desired)
-			if managed {
-				if err != nil {
-					t.Fatal(err)
-				}
-				after := snapshot(t, store.Root)
-				assertUnchanged(t, map[string]fileSnapshot{store.sourcePath(desired.Name): before[store.sourcePath(desired.Name)]},
-					map[string]fileSnapshot{store.sourcePath(desired.Name): after[store.sourcePath(desired.Name)]})
-				assertCompliantNoOp(t, store, desired)
-			} else {
-				if err == nil || !strings.Contains(err.Error(), "externally managed") {
-					t.Fatalf("external rotation error: %v", err)
-				}
-				assertUnchanged(t, before, snapshot(t, store.Root))
+			if _, err := store.Set(desired); err != nil {
+				t.Fatal(err)
 			}
+			after := snapshot(t, store.Root)
+			assertUnchanged(t, map[string]fileSnapshot{store.sourcePath(desired.Name): before[store.sourcePath(desired.Name)]},
+				map[string]fileSnapshot{store.sourcePath(desired.Name): after[store.sourcePath(desired.Name)]})
+			assertCompliantNoOp(t, store, desired)
 		})
 	}
 }
@@ -763,7 +748,7 @@ func TestInlineSigningKeyAndExactPathSuite(t *testing.T) {
 	assertCompliantNoOp(t, store, desired)
 }
 
-func TestCollisionsAndConcurrentEditsAreRejectedBeforeWrites(t *testing.T) {
+func TestExistingDeclaredPathsAreReconciled(t *testing.T) {
 	for _, collision := range []string{"source", "key", "ownership unavailable"} {
 		t.Run(collision, func(t *testing.T) {
 			store := newTestStore(t)
@@ -780,13 +765,15 @@ func TestCollisionsAndConcurrentEditsAreRejectedBeforeWrites(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			before := snapshot(t, store.Root)
-			if _, err := store.Set(desired); err == nil {
-				t.Fatal("unsafe creation succeeded")
+			if _, err := store.Set(desired); err != nil {
+				t.Fatal(err)
 			}
-			assertUnchanged(t, before, snapshot(t, store.Root))
+			assertCompliantNoOp(t, store, desired)
 		})
 	}
+}
+
+func TestConcurrentEditsAreRejectedBeforeWrites(t *testing.T) {
 	store := newTestStore(t)
 	desired := validDesired()
 	if _, err := store.Set(desired); err != nil {
@@ -836,4 +823,267 @@ func TestInputOrderDoesNotAffectCompliance(t *testing.T) {
 	desired.URI += "/"
 	desired.Name = "different-management-label"
 	assertCompliantNoOp(t, store, desired)
+}
+
+func TestNamedRepositoryPropertyDriftIsReconciled(t *testing.T) {
+	for _, managed := range []bool{false, true} {
+		for _, change := range []struct {
+			name string
+			edit func(*Repository)
+		}{
+			{"uri", func(r *Repository) { r.URI = "https://incorrect.example/debian" }},
+			{"suite", func(r *Repository) { r.Suite = "incorrect" }},
+			{"components", func(r *Repository) { r.Components = []string{"wrong"} }},
+			{"architectures", func(r *Repository) { r.Architectures = []string{"arm64"} }},
+			{"signingKey", func(r *Repository) { r.SigningKey = otherTestKey(t) }},
+			{"enabled", func(r *Repository) { enabled := false; r.Enabled = &enabled }},
+		} {
+			t.Run(fmt.Sprintf("managed=%t/%s", managed, change.name), func(t *testing.T) {
+				store := newTestStore(t)
+				desired := validDesired()
+				existing := desired
+				change.edit(&existing)
+				writePublicKeyring(t, store, desired.Name, existing.SigningKey)
+				source := serializeDeb822(existing, store.keyringReference(desired.Name))
+				if managed {
+					source = append([]byte(managedMarker(desired.Name)), source...)
+				}
+				writeFile(t, store.sourcePath(desired.Name), string(source))
+				fixtureFile(t, store, "/etc/apt/sources.list.d/unrelated.sources",
+					string(serializeDeb822(Repository{URI: "https://unrelated.example", Suite: "stable", Components: []string{"main"}}, "/usr/share/keyrings/unrelated.gpg")))
+				fixtureFile(t, store, "/usr/share/keyrings/unrelated.gpg", "unrelated key bytes")
+				before := snapshot(t, store.Root)
+				actual, err := store.Get(desired)
+				if err != nil || actual.URI != existing.URI || actual.Suite != existing.Suite {
+					t.Fatalf("Get must report actual identity properties: %+v, %v", actual, err)
+				}
+				if _, differences, err := store.Test(desired); err != nil || !slices.Equal(differences, []string{change.name}) {
+					t.Fatalf("Test = (%v, %v), want %s", differences, err, change.name)
+				}
+				assertUnchanged(t, before, snapshot(t, store.Root))
+				if _, err := store.Set(desired); err != nil {
+					t.Fatal(err)
+				}
+				for _, path := range []string{
+					filepath.Join(store.Root, "etc", "apt", "sources.list.d", "unrelated.sources"),
+					filepath.Join(store.Root, "usr", "share", "keyrings", "unrelated.gpg"),
+				} {
+					assertUnchanged(t, map[string]fileSnapshot{path: before[path]}, snapshot(t, path))
+				}
+				assertCompliantNoOp(t, store, desired)
+			})
+		}
+	}
+}
+
+func TestNamedMalformedRepositoryCanBeReplaced(t *testing.T) {
+	for _, source := range []string{
+		"Types: deb\nURIs: broken\n",
+		"not a Deb822 definition\n",
+		"Types: deb\nURIs: https://wrong.example\nSuites: wrong\nComponents: main\nEnabled: maybe\n",
+		"Types: deb\nURIs: https://wrong.example\nURIs: https://duplicate.example\nSuites: wrong\n",
+		"Types: deb\nURIs: https://wrong.example\nSuites: wrong\nComponents: main\nSigned-By: not-a-reference\n",
+	} {
+		t.Run(source, func(t *testing.T) {
+			store := newTestStore(t)
+			desired := validDesired()
+			writeFile(t, store.sourcePath(desired.Name), source)
+			before := snapshot(t, store.Root)
+			if _, differences, err := store.Test(desired); err != nil || len(differences) == 0 {
+				t.Fatalf("Test malformed = (%v, %v), want noncompliant", differences, err)
+			}
+			if _, err := store.Get(desired); err == nil {
+				t.Fatal("Get must report unparseable actual state")
+			}
+			assertUnchanged(t, before, snapshot(t, store.Root))
+			if _, err := store.Set(desired); err != nil {
+				t.Fatal(err)
+			}
+			assertCompliantNoOp(t, store, desired)
+		})
+	}
+}
+
+func TestNamedListRepositoryCanBeCorrectedInPlace(t *testing.T) {
+	for _, content := range []string{
+		"deb [arch=arm64] https://incorrect.example wrong main\n",
+		"deb [unterminated\n",
+	} {
+		t.Run(content, func(t *testing.T) {
+			store := newTestStore(t)
+			desired := validDesired()
+			path := fixtureFile(t, store, "/etc/apt/sources.list.d/example.list", content)
+			if _, differences, err := store.Test(desired); err != nil || len(differences) == 0 {
+				t.Fatalf("Test = (%v, %v)", differences, err)
+			}
+			if _, err := store.Set(desired); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(store.sourcePath(desired.Name)); !os.IsNotExist(err) {
+				t.Fatal("created a duplicate .sources file instead of correcting .list")
+			}
+			assertCompliantNoOp(t, store, desired)
+		})
+	}
+}
+
+func TestIncorrectSigningReferenceUsesDeclaredKeyWithoutChangingExternalKey(t *testing.T) {
+	for _, content := range []string{"missing", "corrupt", "different", "inline corrupt"} {
+		t.Run(content, func(t *testing.T) {
+			store := newTestStore(t)
+			desired := validDesired()
+			reference := "/usr/share/keyrings/external.gpg"
+			if content == "corrupt" {
+				fixtureFile(t, store, reference, "corrupt key")
+			} else if content == "different" {
+				key, err := signingKeyBinary(otherTestKey(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				fixtureFile(t, store, reference, string(key))
+			}
+			source := string(serializeDeb822(desired, reference))
+			if content == "inline corrupt" {
+				source = strings.Replace(source, reference, "\n -----BEGIN PGP PUBLIC KEY BLOCK-----\n invalid\n -----END PGP PUBLIC KEY BLOCK-----", 1)
+			}
+			writeFile(t, store.sourcePath(desired.Name), source)
+			before := snapshot(t, store.Root)
+			if _, differences, err := store.Test(desired); err != nil || !slices.Equal(differences, []string{"signingKey"}) {
+				t.Fatalf("Test signing reference = (%v, %v)", differences, err)
+			}
+			assertUnchanged(t, before, snapshot(t, store.Root))
+			if _, err := store.Set(desired); err != nil {
+				t.Fatal(err)
+			}
+			path, err := store.resolve(reference)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if old, exists := before[path]; exists {
+				assertUnchanged(t, map[string]fileSnapshot{path: old}, snapshot(t, path))
+			} else if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Fatal("Set wrote an unrelated key path")
+			}
+			assertCompliantNoOp(t, store, desired)
+		})
+	}
+}
+
+func TestCorruptDeclaredKeyIsReplaced(t *testing.T) {
+	store := newTestStore(t)
+	desired := validDesired()
+	writeFile(t, store.sourcePath(desired.Name), string(serializeDeb822(desired, store.keyringReference(desired.Name))))
+	writeFile(t, store.keyringPath(desired.Name), "corrupt key")
+	before := snapshot(t, store.Root)
+	if _, differences, err := store.Test(desired); err != nil || !slices.Equal(differences, []string{"signingKey"}) {
+		t.Fatalf("Test corrupt key = (%v, %v)", differences, err)
+	}
+	assertUnchanged(t, before, snapshot(t, store.Root))
+	if _, err := store.Set(desired); err != nil {
+		t.Fatal(err)
+	}
+	path := store.sourcePath(desired.Name)
+	assertUnchanged(t, map[string]fileSnapshot{path: before[path]}, snapshot(t, path))
+	assertCompliantNoOp(t, store, desired)
+}
+
+func TestReconciliationPreservesPermissionsAndDoesNotRequireDpkgOwnership(t *testing.T) {
+	store := newTestStore(t)
+	desired := validDesired()
+	if _, err := store.Set(desired); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{store.sourcePath(desired.Name), store.keyringPath(desired.Name)} {
+		if err := os.Chmod(path, 0640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixtureFile(t, store, "/var/lib/dpkg/info/vendor.list",
+		"/etc/apt/sources.list.d/example.sources\n"+store.keyringReference(desired.Name)+"\n")
+	desired.URI = "https://corrected.example"
+	desired.SigningKey = otherTestKey(t)
+	if _, err := store.Set(desired); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		for _, path := range []string{store.sourcePath(desired.Name), store.keyringPath(desired.Name)} {
+			info, err := os.Stat(path)
+			if err != nil || info.Mode().Perm() != 0640 {
+				t.Fatalf("permissions not preserved at %s: %v, %v", path, info, err)
+			}
+		}
+	}
+	assertCompliantNoOp(t, store, desired)
+}
+
+func TestNewIdentityDoesNotDeletePreviousFiles(t *testing.T) {
+	store := newTestStore(t)
+	desired := validDesired()
+	if _, err := store.Set(desired); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{store.sourcePath(desired.Name), store.keyringPath(desired.Name)}
+	before := snapshot(t, store.Root)
+	desired.Name = "new-identity"
+	desired.URI = "https://new.example"
+	if _, err := store.Set(desired); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range paths {
+		assertUnchanged(t, map[string]fileSnapshot{path: before[path]}, snapshot(t, path))
+	}
+	assertCompliantNoOp(t, store, desired)
+}
+
+func TestUnsafeTargetsFailBeforeAnyWrites(t *testing.T) {
+	for _, kind := range []string{"source directory", "key directory", "source symlink", "key symlink", "parent symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			store := newTestStore(t)
+			desired := validDesired()
+			path := store.sourcePath(desired.Name)
+			if strings.HasPrefix(kind, "key") {
+				path = store.keyringPath(desired.Name)
+			} else if kind == "parent symlink" {
+				path = filepath.Dir(path)
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasSuffix(kind, "directory") {
+				if err := os.Mkdir(path, 0755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				target := filepath.Join(store.Root, "external")
+				if kind == "parent symlink" {
+					if err := os.Mkdir(target, 0755); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					writeFile(t, target, "malformed external content")
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			}
+			before := snapshot(t, store.Root)
+			if _, err := store.Set(desired); err == nil || !strings.Contains(err.Error(), filepath.Base(path)) {
+				t.Fatalf("Set must identify unsafe path %s: %v", path, err)
+			}
+			assertUnchanged(t, before, snapshot(t, store.Root))
+		})
+	}
+	for _, name := range []string{"../outside", `..\outside`, "/absolute", `C:\absolute`} {
+		store := newTestStore(t)
+		desired := validDesired()
+		desired.Name = name
+		before := snapshot(t, store.Root)
+		if _, err := store.Set(desired); err == nil || !strings.Contains(err.Error(), "safe filename") {
+			t.Fatalf("unsafe name %q accepted: %v", name, err)
+		}
+		assertUnchanged(t, before, snapshot(t, store.Root))
+	}
 }

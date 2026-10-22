@@ -33,13 +33,10 @@ func (s Store) checkWrite(path string, original []byte, info os.FileInfo, create
 			break
 		}
 	}
-	if err := s.checkPackageOwner("/" + filepath.ToSlash(relative)); err != nil {
-		return err
-	}
 	current, err := os.Lstat(path)
 	if create {
 		if err == nil {
-			return fmt.Errorf("refusing to overwrite existing path %s; choose a different name or reconcile its owner", path)
+			return fmt.Errorf("APT path appeared since discovery: %s; retry with fresh state", path)
 		}
 		if !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -56,29 +53,6 @@ func (s Store) checkWrite(path string, original []byte, info os.FileInfo, create
 	if info == nil || !os.SameFile(info, current) || !info.ModTime().Equal(current.ModTime()) ||
 		info.Mode() != current.Mode() || !bytes.Equal(original, data) {
 		return fmt.Errorf("APT path changed since discovery: %s; retry with fresh state", path)
-	}
-	return nil
-}
-
-func (s Store) checkPackageOwner(reference string) error {
-	dir := filepath.Join(s.Root, "var", "lib", "dpkg", "info")
-	files, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("cannot establish package ownership from %s: %w; restore the dpkg file database before changing APT configuration", dir, err)
-	}
-	for _, file := range files {
-		if !strings.HasSuffix(file.Name(), ".list") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, file.Name()))
-		if err != nil {
-			return fmt.Errorf("read dpkg file ownership: %w", err)
-		}
-		for _, path := range strings.Split(string(data), "\n") {
-			if filepath.Clean(strings.TrimSpace(path)) == filepath.Clean(reference) {
-				return fmt.Errorf("%s is owned by Debian package %s; change its package configuration explicitly", reference, strings.TrimSuffix(file.Name(), ".list"))
-			}
-		}
 	}
 	return nil
 }

@@ -30,6 +30,8 @@ type AptDocument struct {
 	info             os.FileInfo
 	store            Store
 	create           bool
+	parseErr         error
+	replacement      []byte
 }
 
 type documentLine struct {
@@ -81,10 +83,13 @@ func cloneRepositories(entries []AptRepository) []AptRepository {
 }
 
 func (d *AptDocument) changed() bool {
-	return d.create || !reflect.DeepEqual(d.Entries, d.original)
+	return d.create || d.replacement != nil || !reflect.DeepEqual(d.Entries, d.original)
 }
 
 func (d *AptDocument) contents() ([]byte, error) {
+	if d.replacement != nil {
+		return d.replacement, nil
+	}
 	if !d.changed() || d.create {
 		return d.OriginalContents, nil
 	}
