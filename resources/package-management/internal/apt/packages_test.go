@@ -188,7 +188,6 @@ func TestPackagesValidateBeforeExecution(t *testing.T) {
 		{"absent downgrade", Packages{Name: PackageNames{Values: []string{"bash"}}, Ensure: "Absent", AllowDowngrade: true}},
 		{"absent update", Packages{Name: PackageNames{Values: []string{"bash"}}, Ensure: "Absent", UpdateCache: true}},
 		{"scalar list", Packages{Name: PackageNames{Values: []string{"bash", "zsh"}, Scalar: true}}},
-		{"missing local", packageDesired("./not-existing-package.deb")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -698,5 +697,151 @@ func TestPackagesSetPostQueryAndComparisonErrors(t *testing.T) {
 		packageStep{program: "dpkg", args: []string{"--compare-versions", "2", "gt", "1"}, err: packageExit(2)})
 	if _, err := packageManagerFixture(t, steps...).Set(context.Background(), desired); err == nil {
 		t.Fatal("ignored downgrade-comparison error")
+	}
+}
+
+func TestPackagesTestMissingLocalIsNoncompliant(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "not-downloaded.deb")
+	desired := packageDesired(missing)
+	desired.Name.Scalar = true
+	result, differences, err := packageManagerFixture(t, architectureSteps()...).Test(context.Background(), desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(differences, []string{"ensure"}) || result.State != "" || result.Ensure != "Present" {
+		t.Fatalf("result = %+v, differences %v", result, differences)
+	}
+	if len(result.Packages) != 1 || result.Packages[0] != (PackageState{RequestedName: missing}) {
+		t.Fatalf("missing archive must not invent identity or state: %+v", result.Packages)
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Test must not create the archive: %v", err)
+	}
+	relative := packageDesired("./not-existing-package.deb")
+	if _, differences, err := packageManagerFixture(t, architectureSteps()...).Test(context.Background(), relative); err != nil || len(differences) == 0 {
+		t.Fatalf("relative missing archive: %v, %v", differences, err)
+	}
+}
+
+func TestPackagesGetAndSetRejectMissingLocal(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "not-downloaded.deb")
+	for _, desired := range []Packages{packageDesired(missing), packageDesired("bash", missing)} {
+		if _, err := packageManagerFixture(t).Get(context.Background(), desired); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Get error = %v", err)
+		}
+		if _, err := packageManagerFixture(t).Set(context.Background(), desired); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Set error = %v", err)
+		}
+	}
+}
+
+func TestPackagesTestMixedWithMissingLocal(t *testing.T) {
+	path := packageDeb(t, "present.deb")
+	missing := filepath.Join(t.TempDir(), "missing.deb")
+	for _, tc := range []struct {
+		name, state string
+		steps       []packageStep
+	}{
+		{"others installed", "", []packageStep{
+			packageQuery("local-app", packageInstalled("local-app", "2", "amd64")),
+			packageComparison("2", "eq", "2", true),
+			packageQuery("bash", packageInstalled("bash", "1", "amd64")),
+		}},
+		{"others absent", "", []packageStep{packageMissing("local-app"), packageMissing("bash")}},
+		{"others mixed", "Mixed", []packageStep{
+			packageMissing("local-app"), packageQuery("bash", packageInstalled("bash", "1", "amd64")),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := append(architectureSteps(), packageMetadata(path, "local-app", "2", "amd64"), packageVersion("2"))
+			steps = append(steps, tc.steps...)
+			result, differences, err := packageManagerFixture(t, steps...).Test(context.Background(), packageDesired(path, missing, "bash"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(differences, []string{"ensure"}) || result.State != tc.state || len(result.Packages) != 3 {
+				t.Fatalf("result = %+v, differences %v", result, differences)
+			}
+			for _, state := range result.Packages {
+				if state.RequestedName == missing && state != (PackageState{RequestedName: missing}) {
+					t.Fatalf("missing archive state = %+v", state)
+				}
+			}
+		})
+	}
+}
+
+func TestPackagesTestExistingLocalUnchanged(t *testing.T) {
+	path := packageDeb(t, "app.deb")
+	for _, tc := range []struct {
+		name        string
+		query       packageStep
+		compare     []packageStep
+		state       string
+		differences []string
+	}{
+		{"compliant", packageQuery("local-app", packageInstalled("local-app", "1", "amd64")), []packageStep{packageComparison("1", "eq", "1", true)}, "Present", []string{}},
+		{"other version", packageQuery("local-app", packageInstalled("local-app", "0", "amd64")), []packageStep{packageComparison("0", "eq", "1", false)}, "Present", []string{"version"}},
+		{"absent", packageMissing("local-app"), nil, "Absent", []string{"ensure"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := append(architectureSteps(), packageMetadata(path, "local-app", "1", "amd64"), packageVersion("1"), tc.query)
+			steps = append(steps, tc.compare...)
+			result, differences, err := packageManagerFixture(t, steps...).Test(context.Background(), packageDesired(path))
+			if err != nil || result.State != tc.state || !slices.Equal(differences, tc.differences) ||
+				result.Packages[0].Name != "local-app" {
+				t.Fatalf("result = %+v, differences %v, err %v", result, differences, err)
+			}
+		})
+	}
+}
+
+func TestPackagesTestLocalAccessErrors(t *testing.T) {
+	file := packageDeb(t, "file.deb")
+	directory := filepath.Join(t.TempDir(), "directory.deb")
+	if err := os.Mkdir(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"not a directory": filepath.Join(file, "child.deb"),
+		"directory":       directory,
+	}
+	// Root bypasses directory permissions, so the permission case needs a regular user.
+	if os.Geteuid() != 0 {
+		locked := t.TempDir()
+		if err := os.WriteFile(filepath.Join(locked, "app.deb"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(locked, 0700) })
+		cases["permission"] = filepath.Join(locked, "app.deb")
+	}
+	for name, path := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := packageManagerFixture(t).Test(context.Background(), packageDesired(path)); err == nil || errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("expected non-missing access error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestPackagesTestInvalidLocalArchive(t *testing.T) {
+	path := packageDeb(t, "app.deb")
+	missing := filepath.Join(t.TempDir(), "missing.deb")
+	for _, tc := range []struct {
+		name string
+		step packageStep
+	}{
+		{"dpkg-deb failure", packageStep{program: "dpkg-deb", args: []string{"--show", "--showformat=${Package}\t${Version}\t${Architecture}\n", "--", path}, err: packageExit(2), stderr: "not a Debian format archive"}},
+		{"invalid metadata", packageMetadata(path, "--danger", "1", "amd64")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := append(architectureSteps(), tc.step)
+			if _, _, err := packageManagerFixture(t, steps...).Test(context.Background(), packageDesired(path, missing)); err == nil {
+				t.Fatal("invalid archive must remain an error")
+			}
+		})
 	}
 }

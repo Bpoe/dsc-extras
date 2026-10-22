@@ -61,9 +61,15 @@ var packageArchitecture = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 type resolvedPackage struct {
 	input, name, architecture, version, argument string
 	local                                        bool
+	// missing marks a local archive that does not exist; only Test permits it,
+	// and its package identity remains unknown.
+	missing bool
 }
 
-func (m *PackageManager) resolve(ctx context.Context, desired Packages) (Packages, []resolvedPackage, error) {
+// resolve validates and resolves the request. allowMissing permits local
+// archives that do not exist (os.ErrNotExist) so Test can report noncompliance;
+// Get and Set must not set it because they need the archive's identity.
+func (m *PackageManager) resolve(ctx context.Context, desired Packages, allowMissing bool) (Packages, []resolvedPackage, error) {
 	desired.Name.Values = slices.Clone(desired.Name.Values)
 	slices.Sort(desired.Name.Values)
 	desired.Packages, desired.State = nil, ""
@@ -100,14 +106,15 @@ func (m *PackageManager) resolve(ctx context.Context, desired Packages) (Package
 			if err != nil {
 				return desired, nil, err
 			}
+			entry.local, entry.argument = true, path
 			info, err := os.Stat(path)
-			if err != nil {
+			if allowMissing && errors.Is(err, os.ErrNotExist) {
+				entry.missing = true
+			} else if err != nil {
 				return desired, nil, fmt.Errorf("local .deb %q: %w", input, err)
-			}
-			if !info.Mode().IsRegular() {
+			} else if !info.Mode().IsRegular() {
 				return desired, nil, fmt.Errorf("local .deb %q is not a regular file", input)
 			}
-			entry.local, entry.argument = true, path
 		} else {
 			parts := strings.Split(input, ":")
 			if len(parts) > 2 || !packageToken.MatchString(parts[0]) {
@@ -148,6 +155,9 @@ func (m *PackageManager) resolve(ctx context.Context, desired Packages) (Package
 	resolvedNames := map[string]bool{}
 	for index := range resolved {
 		entry := &resolved[index]
+		if entry.missing {
+			continue
+		}
 		if entry.local {
 			output, err := m.run(ctx, "dpkg-deb", "--show", "--showformat=${Package}\t${Version}\t${Architecture}\n", "--", entry.argument)
 			if err != nil {
@@ -264,9 +274,19 @@ func (m *PackageManager) inspect(ctx context.Context, desired Packages, entries 
 	result := desired
 	result.Packages = make([]PackageState, 0, len(entries))
 	compliant := make([]bool, len(entries))
-	allInstalled, allAbsent := true, true
+	allInstalled, allAbsent, anyMissing := true, true, false
 	differences := make([]string, 0)
 	for index, entry := range entries {
+		if entry.missing {
+			// The archive's package identity, version, and architecture cannot be
+			// determined, so it cannot be confirmed as installed.
+			anyMissing = true
+			result.Packages = append(result.Packages, PackageState{RequestedName: entry.input})
+			if !slices.Contains(differences, "ensure") {
+				differences = append(differences, "ensure")
+			}
+			continue
+		}
 		state, err := m.observe(ctx, entry)
 		if err != nil {
 			return result, nil, nil, err
@@ -296,6 +316,10 @@ func (m *PackageManager) inspect(ctx context.Context, desired Packages, entries 
 		}
 	}
 	switch {
+	case anyMissing && (allInstalled || allAbsent):
+		// A missing archive's installation is unknown; omit the aggregate
+		// unless the observed packages are already mixed.
+		result.State = ""
 	case allInstalled:
 		result.State = "Present"
 	case allAbsent:
@@ -308,7 +332,7 @@ func (m *PackageManager) inspect(ctx context.Context, desired Packages, entries 
 }
 
 func (m *PackageManager) Get(ctx context.Context, desired Packages) (Packages, error) {
-	desired, entries, err := m.resolve(ctx, desired)
+	desired, entries, err := m.resolve(ctx, desired, false)
 	if err != nil {
 		return desired, err
 	}
@@ -316,8 +340,10 @@ func (m *PackageManager) Get(ctx context.Context, desired Packages) (Packages, e
 	return result, err
 }
 
+// Test reports a missing local archive as noncompliant rather than an error, so
+// a configuration can be tested before a dependency downloads the archive.
 func (m *PackageManager) Test(ctx context.Context, desired Packages) (Packages, []string, error) {
-	desired, entries, err := m.resolve(ctx, desired)
+	desired, entries, err := m.resolve(ctx, desired, true)
 	if err != nil {
 		return desired, nil, err
 	}
@@ -326,7 +352,7 @@ func (m *PackageManager) Test(ctx context.Context, desired Packages) (Packages, 
 }
 
 func (m *PackageManager) Set(ctx context.Context, desired Packages) (Packages, error) {
-	desired, entries, err := m.resolve(ctx, desired)
+	desired, entries, err := m.resolve(ctx, desired, false)
 	if err != nil {
 		return desired, err
 	}

@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -122,6 +125,50 @@ func TestPackagesInputErrors(t *testing.T) {
 		var stdout, stderr strings.Builder
 		if code := runPackages(context.Background(), args, strings.NewReader("{}"), &stdout, &stderr, nil); code == 0 || stdout.Len() != 0 {
 			t.Fatalf("invalid args %v returned %d, %q", args, code, stdout.String())
+		}
+	}
+}
+
+func TestPackagesTestMissingLocalDeb(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "downloaded-later.deb")
+	input, err := json.Marshal(map[string]any{"name": []string{"git", missing}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr strings.Builder
+	code := runPackages(t.Context(), []string{"test"}, strings.NewReader(string(input)), &stdout, &stderr,
+		newDSCPackageManager(t.TempDir()))
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("test: (%d, %q, %q)", code, stdout.String(), stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("invalid stateAndDiff: %s", stdout.String())
+	}
+	var actual struct {
+		apt.Packages
+		InDesiredState *bool `json:"_inDesiredState"`
+	}
+	var differences []string
+	if err := json.Unmarshal([]byte(lines[0]), &actual); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &differences); err != nil {
+		t.Fatal(err)
+	}
+	if actual.InDesiredState == nil || *actual.InDesiredState || len(differences) == 0 || len(actual.Packages.Packages) != 2 {
+		t.Fatalf("missing archive must be noncompliant: %s", stdout.String())
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("test must not create the archive: %v", err)
+	}
+	for _, operation := range []string{"get", "set"} {
+		stdout.Reset()
+		stderr.Reset()
+		code := runPackages(t.Context(), []string{operation}, strings.NewReader(string(input)), &stdout, &stderr,
+			newDSCPackageManager(t.TempDir()))
+		if code == 0 || stdout.Len() != 0 || !json.Valid([]byte(stderr.String())) {
+			t.Fatalf("%s must fail for a missing archive: (%d, %q, %q)", operation, code, stdout.String(), stderr.String())
 		}
 	}
 }
