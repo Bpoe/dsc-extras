@@ -5,8 +5,8 @@ with its executable entry point in `cmd/dscpm`. It currently implements `Get`,
 `Test`, and `Set` for the DSCv3 resources
 `DscExtras.PackageManagement/aptRepositories` and
 `DscExtras.PackageManagement/packages`. The repository resource manages a logical binary-package (`deb`)
-repository, not a particular filename. Existing configurations created by
-Ansible, a Debian package, or DSC can already satisfy the desired state.
+repository. A declaration adopts and reconciles its named source file,
+including configurations created by Ansible, a Debian package, or DSC.
 
 Resource names use a PascalCase namespace (`DscExtras.PackageManagement`) and
 plural camelCase type (`aptRepositories`, `packages`). Package management selects
@@ -17,7 +17,7 @@ Unknown distributions and unvalidated derivatives return an actionable error;
 DNF repository management and DNF package removal are deferred.
 
 The repository implementation retains the structural rename from `dscapt` in
-`resources/apt`; existing repository behavior and safety rules are unchanged.
+`resources/apt`.
 The manifest
 `manifests/aptRepositories.dsc.resource.json` exposes
 `DscExtras.PackageManagement/aptRepositories`. The compatibility manifest
@@ -48,11 +48,14 @@ filesystem permissions.
 
 ## Repository identity and state
 
-Every operation requires `name`, `uri`, and `suite`. URI and suite identify the
-repository; `name` is a management label used to choose filenames **only when
-creating a missing repository**. A trailing URI slash is equivalent, except in
-URIs containing query strings. Changing a suite selects a different repository;
-remove the old URI/suite explicitly if migrating it.
+Every operation requires `name`, `uri`, and `suite`. The resource first selects
+`/etc/apt/sources.list.d/<name>.sources`, or `<name>.list` if the Deb822 file
+does not exist. A single binary repository in that file is reconciled in place,
+even when its URL or suite differs. For files containing multiple repositories,
+URI and suite select the entry to manage; ambiguous edits are rejected.
+If the named file does not identify the repository, discovery by URI and suite
+preserves existing configurations in other files instead of creating duplicates.
+A trailing URI slash is equivalent, except in URIs containing query strings.
 
 Discovery reads `/etc/apt/sources.list`, `/etc/apt/sources.list.d/*.list`, and
 `/etc/apt/sources.list.d/*.sources`. Multiple lines/stanzas and Deb822
@@ -97,38 +100,45 @@ original bytes, and parsed public-key material. An unchanged `WriteToDisk()`
 does not open files for writing, change modification times or permissions,
 replace files, normalize formatting, or create keyrings.
 
-`Test` and `Get` are read-only. A compliant `Set` returns before any write or
-directory creation, including for package-owned sources and shared keyrings.
+`Test` and `Get` are read-only and never refresh APT metadata. A compliant `Set`
+returns before any write or directory creation, including for package-owned
+sources and shared keyrings.
 Safe changes retain an existing source's format and location, changing only
 affected lines or fields. A changed member of a multi-value Deb822 stanza is
 split into individual stanzas with the other repositories' properties retained.
-Unchanged documents and keyrings are never serialized.
+Unchanged documents and keyrings are never serialized. A malformed named source
+is noncompliant and can be replaced by `Set`; `Get` reports a parsing error when
+its actual properties cannot be read. Malformed unrelated sources still produce
+errors and are not replaced. A malformed named source that overlaps a matching
+repository elsewhere is rejected before any writes rather than creating a
+duplicate definition.
 
 A missing repository creates:
 
 - `/etc/apt/sources.list.d/<name>.sources`, marked as managed by DSC.
 - `/etc/apt/keyrings/<name>.gpg`, containing the supplied public key.
 
-The managed source marker remains `# Managed by dscapt: <name>` for compatibility
-with existing managed files. The rename does not rewrite this marker or change
-the ownership checks that allow safe managed-key rotation.
+New source files retain the legacy `# Managed by dscapt: <name>` comment.
+Neither this marker nor any other ownership metadata is required for adoption
+or reconciliation.
 
-An equivalent existing keyring at the creation path is reused unchanged.
-Unrelated files occupying either creation path are not overwritten. Existing
-external signing material is not rotated automatically. DSC-created keys can
-be rotated only when the marked source is editable and no other source
+An equivalent existing keyring at the declared key path is reused unchanged.
+Incorrect or malformed key material at `/etc/apt/keyrings/<name>.gpg` is replaced,
+regardless of who created it. A different external signing-key reference is
+redirected to that declared key path rather than overwriting an unrelated key.
+Embedded signing material is reconciled in place. Keys can be rotated only
+when the source is editable and no other source
 (including disabled sources, `deb-src`, and filesystem aliases) references
 the key. Removing a repository intentionally retains its keyrings.
 
-Before any change, the resource checks the dpkg file database under
-`/var/lib/dpkg/info/*.list`. It refuses changes to package-owned configuration
-or keys, including trust changes that would leave a package source's bytes
-unchanged. It also refuses writes through symlinks, stale discovery snapshots,
-malformed source files, duplicate/conflicting definitions, and ambiguous edits
+The declaration establishes ownership of the selected source and declared key
+path; no dpkg ownership lookup, force flag, or adoption step is needed.
+The resource rejects unsafe names and paths and refuses writes through symlinks,
+stale discovery snapshots, duplicate/conflicting definitions, and ambiguous edits
 to repositories distributed across multiple entries. Consistent entries with
 disjoint components can collectively satisfy a desired repository without edits.
-If ownership cannot be established, no change is made. Errors identify the
-source, owner, or ambiguity that must be resolved explicitly.
+Errors identify genuine filesystem problems or the source ambiguity that must
+be resolved explicitly. Atomic replacement preserves existing file permissions.
 
 Key and source writes use separate atomic file replacements, not a filesystem
 transaction. All safety checks run before either write. An I/O failure between
@@ -167,7 +177,6 @@ are not needed:
 }
 ```
 
-This intentionally replaces the earlier filename-only `Get`/`Absent` contract.
 Use these properties as the JSON input to `dscpm aptRepositories get`, `test`,
 or `set`, as appropriate.
 
@@ -202,27 +211,19 @@ resources:
       enabled: true
 ```
 
-### Changing suites explicitly
+### Correcting or migrating an existing repository
 
-Changing `suite` from `bookworm` to `trixie` selects a different repository; it
-does not migrate or remove the `bookworm` definition. If the old repository is
-no longer wanted, explicitly apply:
+Keep `name` unchanged when correcting a URL, suite, components, architecture
+restriction, or signing key. For example, changing Docker's URL from
+`https://download.docker.com/linux/debian` to
+`https://download.docker.com/linux/ubuntu` repairs the existing `docker.sources`
+on the next `set`; no manual deletion is required. A suite change likewise
+updates that file, and subsequent runs are no-ops.
 
-```json
-{
-  "name": "docker",
-  "uri": "https://download.docker.com/linux/debian",
-  "suite": "bookworm",
-  "ensure": "Absent"
-}
-```
-
-Then apply the `Present` example above with `"suite": "trixie"` and, for example,
-`"name": "docker-trixie"`. A distinct name avoids colliding with the retained
-old source document/keyring when new files are needed. Existing trixie
-definitions are still discovered by URI and suite regardless of their names.
-This removes only the old `deb` definition; related `deb-src` entries must be
-managed separately.
+Changing `name` may select a different filename. Previously named or unrelated
+files are not automatically deleted; use `ensure: Absent` to remove an old
+definition explicitly when needed. Related `deb-src` entries and signing
+keyrings are retained.
 
 ## DNF/RPM package installation
 

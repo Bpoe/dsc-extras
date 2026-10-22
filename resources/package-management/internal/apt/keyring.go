@@ -34,8 +34,9 @@ type AptKeyring struct {
 	info             os.FileInfo
 	store            Store
 	create           bool
-	allowChange      bool
 }
+
+type keyringContentError struct{ error }
 
 func (s Store) ReadKeyring(reference string) (*AptKeyring, error) {
 	path, err := s.resolve(reference)
@@ -65,7 +66,7 @@ func (s Store) ReadKeyring(reference string) (*AptKeyring, error) {
 		err = errors.New("APT keyrings must use .asc for ASCII armor or .gpg for binary OpenPGP")
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read signing key %q: %w", reference, err)
+		return key, &keyringContentError{fmt.Errorf("read signing key %q: %w", reference, err)}
 	}
 	key.originalMaterial = slices.Clone(key.Material)
 	return key, nil
@@ -78,9 +79,6 @@ func (k *AptKeyring) changed() bool {
 func (k *AptKeyring) preflight() error {
 	if !k.changed() {
 		return nil
-	}
-	if !k.create && !k.allowChange {
-		return fmt.Errorf("refusing to overwrite signing key %q without exclusive DSC ownership", k.Reference)
 	}
 	return k.store.checkWrite(k.Path, k.OriginalContents, k.info, k.create)
 }
@@ -209,7 +207,11 @@ func canonicalPublicKeyring(data []byte) ([]byte, error) {
 
 func (s Store) signingMaterial(signing SigningConfiguration) ([]byte, error) {
 	if signing.InlineKey != "" {
-		return signingKeyBinary(signing.InlineKey)
+		material, err := signingKeyBinary(signing.InlineKey)
+		if err != nil {
+			return nil, &keyringContentError{err}
+		}
+		return material, nil
 	}
 	if len(signing.Keyrings) == 0 {
 		if len(signing.Fingerprints) != 0 {
