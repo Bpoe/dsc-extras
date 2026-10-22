@@ -88,6 +88,64 @@ func TestUserConfiguration(t *testing.T) {
 	}
 }
 
+func TestTemplateEnablement(t *testing.T) {
+	for _, scope := range []string{"system", "user"} {
+		for _, dependency := range []string{"default.target.wants", "example.target.requires", "example.target.upholds"} {
+			t.Run(scope+"/"+dependency, func(t *testing.T) {
+				manager, executor := fixture(t)
+				path := executor.path(scope, filepath.Join(dependency, "worker@default.service"))
+				symlink(t, path, "../worker@.service")
+				for _, test := range []struct {
+					name string
+					want bool
+				}{
+					{"worker@.service", true},
+					{"worker@default.service", true},
+					{"worker@other.service", false},
+					{"other@.service", false},
+					{"worker.service", false},
+					{"worker@.timer", false},
+				} {
+					enabled, links, err := manager.persistentEnablement(scope, []string{test.name})
+					if err != nil || enabled != test.want || (len(links) == 1) != test.want {
+						t.Fatalf("%s enablement = %t, links = %v, error = %v", test.name, enabled, links, err)
+					}
+					if test.want && links[0].path != path {
+						t.Fatalf("template did not retain the exact instance link: %+v", links)
+					}
+				}
+			})
+		}
+	}
+	t.Run("template alias", func(t *testing.T) {
+		manager, executor := fixture(t)
+		symlink(t, executor.path("system", "alias@.service"), "worker@.service")
+		symlink(t, executor.path("system", filepath.Join("default.target.wants", "alias@default.service")), "../alias@.service")
+		enabled, links, err := manager.persistentEnablement("system", []string{"worker@.service"})
+		if err != nil || !enabled || len(links) != 2 {
+			t.Fatalf("aliased instance enablement lost: %t %v %v", enabled, links, err)
+		}
+	})
+	t.Run("runtime instance is not persistent", func(t *testing.T) {
+		manager, _ := fixture(t)
+		symlink(t, filepath.Join(manager.root, "run", "systemd", "system", "default.target.wants", "worker@default.service"), "../worker@.service")
+		enabled, _, err := manager.persistentEnablement("system", []string{"worker@.service"})
+		if err != nil || enabled {
+			t.Fatalf("runtime instance enabled template persistently: %t %v", enabled, err)
+		}
+	})
+	t.Run("invalid instance names do not enable template", func(t *testing.T) {
+		manager, executor := fixture(t)
+		for _, instance := range []string{"worker@@default.service", "worker@*.service", "worker@invalid instance.service"} {
+			symlink(t, executor.path("system", filepath.Join("default.target.wants", instance)), "../worker@.service")
+		}
+		enabled, _, err := manager.persistentEnablement("system", []string{"worker@.service"})
+		if err != nil || enabled {
+			t.Fatalf("invalid instance enabled template: %t %v", enabled, err)
+		}
+	})
+}
+
 func TestRestoreEnablement(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "custom.target.wants", "example.service")

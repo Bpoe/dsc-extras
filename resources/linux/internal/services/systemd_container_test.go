@@ -90,6 +90,16 @@ WantedBy=default.target
 EOF
 cp /usr/lib/systemd/system/dsclinux-test.service /usr/lib/systemd/user/dsclinux-test.service
 cp /usr/lib/systemd/system/dsclinux-test.service /usr/lib/systemd/system/dsclinux-test@.service
+cat > /usr/lib/systemd/system/dsclinux-default@.service <<'EOF'
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+[Install]
+WantedBy=default.target
+DefaultInstance=default
+EOF
+cp /usr/lib/systemd/system/dsclinux-default@.service /usr/lib/systemd/user/dsclinux-default@.service
 cat > /usr/lib/systemd/system/dsclinux-test.timer <<'EOF'
 [Timer]
 OnActiveSec=1h
@@ -117,6 +127,20 @@ ExecStart=/bin/false
 EOF
 systemctl daemon-reload
 systemctl start user@0.service
+cat > /usr/local/bin/systemctl <<'EOF'
+#!/bin/sh
+for arg do
+    case "$arg" in
+        start|stop|enable|disable|mask|unmask|reset-failed|daemon-reload)
+            printf '%s\n' "$*" >> /run/dsclinux-mutations
+            break
+            ;;
+    esac
+done
+exec /usr/bin/systemctl "$@"
+EOF
+chmod +x /usr/local/bin/systemctl
+: > /run/dsclinux-mutations
 `, "exec", "-i", name, "sh", "-s")
 
 	invoke := func(t *testing.T, operation, input string) Unit {
@@ -183,6 +207,80 @@ systemctl mask dsclinux-test.service
 		}
 		command(t, "", "exec", name, "systemctl", "unmask", "dsclinux-test@.service")
 	})
+	for _, scope := range []string{"system", "user"} {
+		t.Run("default instance/"+scope, func(t *testing.T) {
+			input := fmt.Sprintf(`{"name":"dsclinux-default@.service","scope":%q,"enabled":true}`, scope)
+			actual := invoke(t, "get", input)
+			if *actual.Enabled || actual.State != nil || actual.ActiveState != "" {
+				t.Fatalf("disabled template must not report instance runtime state: %+v", actual)
+			}
+			actual = invoke(t, "set", input)
+			if !*actual.Enabled || actual.UnitFileState != "enabled" {
+				t.Fatalf("template Set did not converge through DefaultInstance: %+v", actual)
+			}
+			status := command(t, "", "exec", "--env", "XDG_RUNTIME_DIR=/run/user/0",
+				"--env", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus",
+				name, "systemctl", "--"+scope, "is-enabled", "dsclinux-default@.service")
+			if strings.TrimSpace(status) != "enabled" {
+				t.Fatalf("template fixture is not enabled: %s", status)
+			}
+			checkCompliant := func() {
+				t.Helper()
+				before := command(t, "", "exec", name, "cat", "/run/dsclinux-mutations")
+				actual := invoke(t, "get", input)
+				if !*actual.Enabled {
+					t.Fatalf("enabled default instance did not enable its template: %+v", actual)
+				}
+				output := command(t, input, "exec", "-i", "--env", "XDG_RUNTIME_DIR=/run/user/0",
+					"--env", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus",
+					name, "dsclinux", "services", "test")
+				var result struct {
+					Unit
+					InDesiredState bool `json:"_inDesiredState"`
+				}
+				var diff []string
+				decoder := json.NewDecoder(strings.NewReader(output))
+				if err := decoder.Decode(&result); err != nil || !result.InDesiredState || !*result.Enabled {
+					t.Fatalf("enabled template Test state: %s (%v)", output, err)
+				}
+				if err := decoder.Decode(&diff); err != nil || diff == nil || len(diff) != 0 {
+					t.Fatalf("enabled template Test differences: %s (%v)", output, err)
+				}
+				invoke(t, "set", input)
+				after := command(t, "", "exec", name, "cat", "/run/dsclinux-mutations")
+				if before != after {
+					t.Fatalf("Get/Test/compliant Set mutated template configuration:\nbefore: %s\nafter: %s", before, after)
+				}
+			}
+			checkCompliant()
+			actual = invoke(t, "set", fmt.Sprintf(`{"name":"dsclinux-default@.service","scope":%q,"masked":true}`, scope))
+			if !*actual.Enabled || !*actual.Masked {
+				t.Fatalf("mask hid the template's enabled default instance: %+v", actual)
+			}
+			checkCompliant()
+			actual = invoke(t, "set", fmt.Sprintf(`{"name":"dsclinux-default@.service","scope":%q,"masked":false}`, scope))
+			if !*actual.Enabled || *actual.Masked {
+				t.Fatalf("unmask pruned the template's default-instance enablement: %+v", actual)
+			}
+			actual = invoke(t, "set", fmt.Sprintf(`{"name":"dsclinux-default@.service","scope":%q,"enabled":false}`, scope))
+			if *actual.Enabled {
+				t.Fatalf("template disable did not remove instance enablement: %+v", actual)
+			}
+			command(t, "", "exec", "--env", "XDG_RUNTIME_DIR=/run/user/0",
+				"--env", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus",
+				name, "systemctl", "--"+scope, "enable", "dsclinux-default@custom.service")
+			actual = invoke(t, "get", input)
+			if !*actual.Enabled || actual.UnitFileState != "indirect" {
+				t.Fatalf("non-default enabled instance was not observed independently: %+v", actual)
+			}
+			checkCompliant()
+			actual = invoke(t, "get", fmt.Sprintf(`{"name":"dsclinux-default@other.service","scope":%q}`, scope))
+			if *actual.Enabled {
+				t.Fatalf("sibling instance inherited another instance's enablement: %+v", actual)
+			}
+			invoke(t, "set", fmt.Sprintf(`{"name":"dsclinux-default@.service","scope":%q,"enabled":false}`, scope))
+		})
+	}
 	t.Run("new definition", func(t *testing.T) {
 		invoke(t, "get", `{"name":"dsclinux-new"}`)
 		command(t, "", "exec", name, "cp", "/usr/lib/systemd/system/dsclinux-static.service",

@@ -75,6 +75,9 @@ func normalize(desired Unit) (Unit, string, error) {
 	if desired.State != nil && *desired.State != "active" && *desired.State != "inactive" {
 		return desired, "", errors.New("state must be active or inactive; restart and reload are not desired states")
 	}
+	if desired.State != nil && strings.HasSuffix(name, "@."+suffix(name)) {
+		return desired, "", errors.New("state requires a concrete unit instance, not a template; specify a name such as worker@default.service")
+	}
 	if desired.Scope == "" {
 		desired.Scope = "system"
 	}
@@ -114,21 +117,40 @@ type observation struct {
 }
 
 func (m *Manager) observe(ctx context.Context, desired Unit, name string) (observation, error) {
-	output, err := m.run(ctx, desired.Scope, "show",
-		"--property=Id,Names,ActiveState,SubState,LoadState,UnitFileState,NeedDaemonReload,FragmentPath", "--", name)
-	if err != nil {
-		return observation{}, err
-	}
 	properties := make(map[string]string)
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		key, value, ok := strings.Cut(line, "=")
-		if ok {
-			properties[key] = strings.TrimSpace(value)
+	if strings.HasSuffix(name, "@."+suffix(name)) {
+		output, err := m.run(ctx, desired.Scope, "list-unit-files", "--all", "--full", "--no-legend", "--", name)
+		if err != nil {
+			return observation{}, err
 		}
-	}
-	_, hasUnitFileState := properties["UnitFileState"]
-	if properties["ActiveState"] == "" || properties["LoadState"] == "" || !hasUnitFileState {
-		return observation{}, errors.New("systemctl show did not return ActiveState, LoadState and UnitFileState")
+		for _, line := range strings.Split(string(output), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[0] == name {
+				properties["UnitFileState"] = fields[1]
+			}
+		}
+		if properties["UnitFileState"] == "" {
+			if strings.TrimSpace(string(output)) != "" {
+				return observation{}, errors.New("systemctl list-unit-files did not return the requested template and its unit-file state")
+			}
+			properties["LoadState"] = "not-found"
+		}
+	} else {
+		output, err := m.run(ctx, desired.Scope, "show",
+			"--property=Id,Names,ActiveState,SubState,LoadState,UnitFileState,NeedDaemonReload,FragmentPath", "--", name)
+		if err != nil {
+			return observation{}, err
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+			key, value, ok := strings.Cut(line, "=")
+			if ok {
+				properties[key] = strings.TrimSpace(value)
+			}
+		}
+		_, hasUnitFileState := properties["UnitFileState"]
+		if properties["ActiveState"] == "" || properties["LoadState"] == "" || !hasUnitFileState {
+			return observation{}, errors.New("systemctl show did not return ActiveState, LoadState and UnitFileState")
+		}
 	}
 	names := strings.Fields(properties["Names"])
 	names = append(names, name)

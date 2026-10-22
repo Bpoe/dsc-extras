@@ -30,14 +30,14 @@
       "required": ["name"],
       "properties": {
         "name": {
-          "description": "Literal systemd unit name; names without a unit type suffix resolve to .service.",
+          "description": "Literal systemd unit name; names without a unit type suffix resolve to .service. Templates manage persistent instance enablement and masking, not runtime state.",
           "type": "string",
           "minLength": 1,
           "maxLength": 255,
           "x-dsc-key": true
         },
         "state": {
-          "description": "Desired ActiveState. Unmanaged when omitted. Returned only for active/inactive; see activeState for all raw states.",
+          "description": "Desired ActiveState for a concrete unit or instance, not a template. Unmanaged when omitted. Returned only for active/inactive; see activeState for all raw states.",
           "type": "string",
           "enum": ["active", "inactive"]
         },

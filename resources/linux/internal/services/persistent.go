@@ -110,13 +110,22 @@ func (m *Manager) persistentEnablement(scope string, names []string) (bool, []co
 		if link.target == "/dev/null" {
 			continue
 		}
-		if (link.dependency && slices.Contains(names, link.name)) ||
+		if (link.dependency && matchesUnit(link.name, names)) ||
 			(!link.dependency && link.name != target && slices.Contains(names, target)) {
 			enabled = true
 			enablement = append(enablement, link)
 		}
 	}
 	return enabled, enablement, nil
+}
+
+func matchesUnit(name string, names []string) bool {
+	if slices.Contains(names, name) {
+		return true
+	}
+	at, dot := strings.IndexByte(name, '@'), strings.LastIndexByte(name, '.')
+	return at > 0 && dot > at+1 && strings.Count(name, "@") == 1 && unitName.MatchString(name) &&
+		slices.Contains(names, name[:at+1]+name[dot:])
 }
 
 func readConfigLink(path, name string, dependency bool) (configLink, error) {

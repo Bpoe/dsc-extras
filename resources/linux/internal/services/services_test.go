@@ -28,6 +28,7 @@ type fakeSystemctl struct {
 	static, ignoreMutation    bool
 	runtimeMask, masked       bool
 	pruneOnUnmask             bool
+	defaultInstance           string
 }
 
 func fixture(t *testing.T) (*Manager, *fakeSystemctl) {
@@ -59,7 +60,11 @@ func (f *fakeSystemctl) path(scope, name string) string {
 }
 
 func (f *fakeSystemctl) enable(scope, name string) {
-	symlink(f.t, f.path(scope, filepath.Join("default.target.wants", name)), filepath.Join("..", name))
+	instance := name
+	if f.defaultInstance != "" {
+		instance = strings.Replace(name, "@.", "@"+f.defaultInstance+".", 1)
+	}
+	symlink(f.t, f.path(scope, filepath.Join("default.target.wants", instance)), filepath.Join("..", name))
 }
 
 func (f *fakeSystemctl) mask(scope, name string) {
@@ -92,7 +97,7 @@ func (f *fakeSystemctl) Execute(ctx context.Context, args []string) ([]byte, []b
 	if args[len(args)-2] != "--" {
 		f.t.Fatalf("missing option terminator: %v", args)
 	}
-	if operation == "show" {
+	if operation == "show" || operation == "list-unit-files" {
 		enabled, _, err := f.manager.persistentEnablement(scope, []string{name})
 		if err != nil {
 			return nil, nil, err
@@ -112,6 +117,12 @@ func (f *fakeSystemctl) Execute(ctx context.Context, args []string) ([]byte, []b
 		}
 		if f.file != "" {
 			file = f.file
+		}
+		if operation == "list-unit-files" {
+			if f.load == "not-found" {
+				return nil, nil, nil
+			}
+			return []byte(fmt.Sprintf("%s %s -\n", name, file)), nil, nil
 		}
 		load := f.load
 		if f.masked {
@@ -146,8 +157,14 @@ func (f *fakeSystemctl) Execute(ctx context.Context, args []string) ([]byte, []b
 			f.enable(scope, name)
 		}
 	case "disable":
-		if err := os.Remove(f.path(scope, filepath.Join("default.target.wants", name))); err != nil {
+		_, links, err := f.manager.persistentEnablement(scope, []string{name})
+		if err != nil {
 			f.t.Fatal(err)
+		}
+		for _, link := range links {
+			if err := os.Remove(link.path); err != nil {
+				f.t.Fatal(err)
+			}
 		}
 	case "mask":
 		if _, err := os.Lstat(f.path(scope, name)); errors.Is(err, os.ErrNotExist) {
@@ -161,8 +178,14 @@ func (f *fakeSystemctl) Execute(ctx context.Context, args []string) ([]byte, []b
 		}
 		f.masked = false
 		if f.pruneOnUnmask {
-			if err := os.Remove(f.path(scope, filepath.Join("default.target.wants", name))); err != nil {
+			_, links, err := f.manager.persistentEnablement(scope, []string{name})
+			if err != nil {
 				f.t.Fatal(err)
+			}
+			for _, link := range links {
+				if err := os.Remove(link.path); err != nil {
+					f.t.Fatal(err)
+				}
 			}
 		}
 	default:
@@ -174,7 +197,7 @@ func (f *fakeSystemctl) Execute(ctx context.Context, args []string) ([]byte, []b
 func mutations(calls []string) []string {
 	result := []string{}
 	for _, call := range calls {
-		if call != "show" {
+		if call != "show" && call != "list-unit-files" {
 			result = append(result, call)
 		}
 	}
@@ -249,6 +272,74 @@ func TestReconcile(t *testing.T) {
 	}
 }
 
+func TestTemplateReconcile(t *testing.T) {
+	for _, scope := range []string{"system", "user"} {
+		for _, masked := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/masked=%t", scope, masked), func(t *testing.T) {
+				manager, executor := fixture(t)
+				executor.defaultInstance = "default"
+				executor.pruneOnUnmask = true
+				desired := Unit{Name: "worker@.service", Scope: scope, Enabled: ptr(true)}
+				if masked {
+					executor.mask(scope, desired.Name)
+				}
+				actual, err := manager.Get(t.Context(), desired)
+				if err != nil || *actual.Enabled || actual.State != nil || actual.ActiveState != "" || actual.SubState != "" {
+					t.Fatalf("template must report only unit-file state: %+v %v", actual, err)
+				}
+				executor.calls = nil
+				actual, err = manager.Set(t.Context(), desired)
+				want := []string{"enable"}
+				if masked {
+					want = []string{"unmask", "enable", "mask"}
+				}
+				if err != nil || !*actual.Enabled || *actual.Masked != masked || !slices.Equal(mutations(executor.calls), want) {
+					t.Fatalf("template Set: %+v %v; mutations %v, want %v", actual, err, mutations(executor.calls), want)
+				}
+				executor.calls = nil
+				actual, diff, err := manager.Test(t.Context(), desired)
+				if err != nil || len(diff) != 0 || !*actual.Enabled || len(mutations(executor.calls)) != 0 {
+					t.Fatalf("enabled template Test must be read-only and compliant: %+v %v %v", actual, diff, err)
+				}
+				executor.calls = nil
+				if _, err := manager.Set(t.Context(), desired); err != nil ||
+					!slices.Equal(executor.calls, []string{"list-unit-files"}) {
+					t.Fatalf("compliant template Set mutated configuration: %v %v", executor.calls, err)
+				}
+				if masked {
+					actual, err = manager.Set(t.Context(), Unit{Name: desired.Name, Scope: scope, Masked: ptr(false)})
+					if err != nil || !*actual.Enabled || *actual.Masked {
+						t.Fatalf("unmask pruned template's instance enablement: %+v %v", actual, err)
+					}
+				}
+				actual, err = manager.Set(t.Context(), Unit{Name: desired.Name, Scope: scope, Enabled: ptr(false)})
+				if err != nil || *actual.Enabled {
+					t.Fatalf("template disable did not converge: %+v %v", actual, err)
+				}
+			})
+		}
+	}
+	t.Run("missing template", func(t *testing.T) {
+		manager, executor := fixture(t)
+		executor.load = "not-found"
+		desired := Unit{Name: "missing@.service", Enabled: ptr(true)}
+		actual, err := manager.Get(t.Context(), desired)
+		if err != nil || actual.LoadState != "not-found" || *actual.Enabled {
+			t.Fatalf("missing template: %+v %v", actual, err)
+		}
+		if _, err := manager.Set(t.Context(), desired); err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("missing template Set claimed success: %v", err)
+		}
+	})
+	t.Run("unit-file inspection failure", func(t *testing.T) {
+		manager, executor := fixture(t)
+		executor.fail["list-unit-files"] = "Permission denied"
+		if _, err := manager.Get(t.Context(), Unit{Name: "worker@.service"}); err == nil || !strings.Contains(err.Error(), "Permission denied") {
+			t.Fatalf("template inspection failure hidden: %v", err)
+		}
+	})
+}
+
 func TestRawDiagnosticsAndDifferences(t *testing.T) {
 	for _, state := range []string{"failed", "activating", "deactivating", "reloading", "active", "inactive"} {
 		t.Run(state, func(t *testing.T) {
@@ -293,6 +384,7 @@ func TestInvalidProperties(t *testing.T) {
 		{Name: "a@@b.service"}, {Name: "@one.service"}, {Name: ".service"}, {Name: strings.Repeat("a", 256)},
 		{Name: "example", State: ptr("")}, {Name: "example", State: ptr("restart")},
 		{Name: "example", State: ptr("failed")}, {Name: "example", Scope: "global"},
+		{Name: "worker@.service", State: ptr("active")}, {Name: "worker@.service", State: ptr("inactive")},
 	} {
 		manager, executor := fixture(t)
 		for _, operation := range []func(context.Context, Unit) (Unit, error){manager.Get, manager.Set} {

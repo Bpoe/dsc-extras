@@ -111,6 +111,15 @@ A template mask inherited by an instance is observed as masked. Removing that
 shared mask must be done explicitly using the defining template name, rather
 than implicitly changing every instance while reconciling just one.
 
+Templates such as `worker@.service` support persistent enablement and masking.
+Their enablement includes persistent links for concrete instances such as
+`worker@default.service`; enabling a disabled template lets systemd choose the
+instance through `DefaultInstance=`. A non-default enabled instance also counts
+as persistent enablement, even when the raw `unitFileState` is `indirect`.
+Templates themselves have no runtime unit object, so their observations omit
+`state`, `activeState`, and `subState`. Specify a concrete instance name when
+managing runtime activation.
+
 ## Examples
 
 Manage all three independent properties:
