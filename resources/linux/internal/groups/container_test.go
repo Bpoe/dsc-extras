@@ -214,4 +214,81 @@ useradd -M -g dsclinux-base old
 	for _, user := range []string{"alice", "bob", "carol", "old"} {
 		command("", "exec", name, "getent", "passwd", user)
 	}
+
+	t.Run("split membership", func(t *testing.T) {
+		command(`set -eu
+groupadd -g 32010 dsclinux-split
+gpasswd -a alice dsclinux-split
+printf 'dsclinux-split:x:32010:bob,old\n' >> /etc/group
+`, "exec", "-i", name, "sh", "-s")
+		database := func() string {
+			t.Helper()
+			return command("", "exec", name, "cat", "/etc/group", "/etc/gshadow", "/etc/passwd", "/etc/shadow")
+		}
+		beforeDB := database()
+		if !strings.Contains(beforeDB, "dsclinux-split:x:32010:alice\n") ||
+			!strings.Contains(beforeDB, "dsclinux-split:x:32010:bob,old\n") {
+			t.Fatal("fixture does not contain distinct split /etc/group entries")
+		}
+		t.Logf("native tools: %s", command("", "exec", name, "dpkg-query", "-W", "passwd"))
+		for _, args := range [][]string{
+			{"-a", "carol", "dsclinux-split"},
+			{"-d", "alice", "dsclinux-split"},
+			{"-d", "old", "dsclinux-split"},
+			{"-M", "bob,carol", "dsclinux-split"},
+			{"-M", "", "dsclinux-split"},
+		} {
+			output, err := exec.CommandContext(ctx, docker, append([]string{"exec", name, "gpasswd"}, args...)...).CombinedOutput()
+			t.Logf("gpasswd %q: %v\n%s", args, err, output)
+			if err == nil || database() != beforeDB {
+				t.Fatalf("expected unsupported native split mutation with unchanged account databases: %q", args)
+			}
+		}
+		beforeMutations := mutations()
+		actual := invoke("get", `{"name":"dsclinux-split"}`)
+		if actual.GID == nil || *actual.GID != 32010 ||
+			!slices.Equal(memberList(actual), []string{"alice", "bob", "old"}) {
+			t.Fatalf("Get did not union split membership: %+v", actual)
+		}
+		assertNoop(`{"name":"dsclinux-split"}`)
+		assertNoop(`{"name":"dsclinux-split","members":["old","alice","bob"]}`)
+		assertNoop(`{"name":"dsclinux-split","includedMembers":["old"],"excludedMembers":["carol"]}`)
+		assertNoop(`{"name":"dsclinux-split","includedMembers":[],"excludedMembers":[]}`)
+		for _, test := range []struct {
+			input string
+			diff  []string
+		}{
+			{`{"name":"dsclinux-split","includedMembers":["carol"]}`, []string{"includedMembers"}},
+			{`{"name":"dsclinux-split","excludedMembers":["alice"]}`, []string{"excludedMembers"}},
+			{`{"name":"dsclinux-split","excludedMembers":["old"]}`, []string{"excludedMembers"}},
+			{`{"name":"dsclinux-split","members":["bob","carol"]}`, []string{"members"}},
+			{`{"name":"dsclinux-split","members":["alice"]}`, []string{"members"}},
+			{`{"name":"dsclinux-split","members":[]}`, []string{"members"}},
+			{`{"name":"dsclinux-split","gid":32011,"members":[]}`, []string{"gid", "members"}},
+		} {
+			for range 2 {
+				output, err := invokeRaw("test", test.input)
+				if err != nil {
+					t.Fatalf("Test %s: %v\n%s", test.input, err, output)
+				}
+				var state struct {
+					Members        []string `json:"members"`
+					InDesiredState bool     `json:"_inDesiredState"`
+				}
+				var diff []string
+				decoder := json.NewDecoder(strings.NewReader(output))
+				if err := decoder.Decode(&state); err != nil || state.InDesiredState ||
+					!slices.Equal(state.Members, []string{"alice", "bob", "old"}) {
+					t.Fatalf("Test did not compare combined membership: %s (%v)", output, err)
+				}
+				if err := decoder.Decode(&diff); err != nil || !slices.Equal(diff, test.diff) {
+					t.Fatalf("Test diff: %v; want %v (%v)", diff, test.diff, err)
+				}
+				expectFailure(test.input, "split-group membership modification is unsupported")
+				if mutations() != beforeMutations || database() != beforeDB {
+					t.Fatalf("Get/Test/repeated Set changed split entries or unrelated accounts: %s", test.input)
+				}
+			}
+		}
+	})
 }

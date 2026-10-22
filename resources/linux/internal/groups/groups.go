@@ -24,6 +24,7 @@ type Group struct {
 	Members         *[]string `json:"members,omitempty"`
 	IncludedMembers *[]string `json:"includedMembers,omitempty"`
 	ExcludedMembers *[]string `json:"excludedMembers,omitempty"`
+	split           bool
 }
 
 func (g *Group) UnmarshalJSON(data []byte) error {
@@ -169,6 +170,7 @@ func parseGroup(data []byte, name string) (Group, error) {
 		if actual.GID != nil && *actual.GID != gid {
 			return Group{}, fmt.Errorf("local group %q has conflicting GIDs %d and %d", name, *actual.GID, gid)
 		}
+		actual.split = actual.GID != nil
 		actual.Ensure, actual.GID = "Present", &gid
 		if fields[3] != "" {
 			for _, member := range strings.Split(fields[3], ",") {
@@ -350,6 +352,17 @@ func exclusionError(desired, actual Group, primary map[string]int64) error {
 	return nil
 }
 
+func splitMembershipError(desired, actual Group) error {
+	if actual.split {
+		for _, property := range differences(desired, actual, nil) {
+			if property == "members" || property == "includedMembers" || property == "excludedMembers" {
+				return fmt.Errorf("cannot modify membership of split local group %q: split-group membership modification is unsupported by gpasswd; consolidate same-name, same-GID /etc/group entries using your account-administration tools before retrying", desired.Name)
+			}
+		}
+	}
+	return nil
+}
+
 func (m *Manager) Set(ctx context.Context, desired Group) (Group, error) {
 	desired, err := normalize(desired)
 	if err != nil {
@@ -365,6 +378,9 @@ func (m *Manager) Set(ctx context.Context, desired Group) (Group, error) {
 	}
 	if len(differences(desired, actual, primary)) == 0 {
 		return actual, nil
+	}
+	if err := splitMembershipError(desired, actual); err != nil {
+		return Group{}, err
 	}
 	if err := exclusionError(desired, actual, primary); err != nil {
 		return Group{}, err
@@ -406,6 +422,9 @@ func (m *Manager) Set(ctx context.Context, desired Group) (Group, error) {
 		}
 		if actual.Ensure != "Present" {
 			return Group{}, fmt.Errorf("group %q is still absent after creation", desired.Name)
+		}
+		if err := splitMembershipError(desired, actual); err != nil {
+			return Group{}, err
 		}
 		primary, err = m.primaryGIDs(ctx, desired)
 		if err != nil {
