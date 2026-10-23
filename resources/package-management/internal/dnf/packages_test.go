@@ -175,6 +175,41 @@ func fixture(name, version, arch string) identity {
 	return p
 }
 
+func TestExportEnumeratesInstalledRPMIdentities(t *testing.T) {
+	executor := &fakeExecutor{t: t, installed: []identity{
+		fixture("zlib", "2:1.2-3", "x86_64"),
+		fixture("zlib", "2:1.2-3", "i686"),
+		fixture("noarch-pkg", "1-1", "noarch"),
+	}}
+	manager := NewPackageManager(executor)
+	items, err := manager.Export(context.Background(), packages.Packages{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 || items[0].Name.Values[0] != "noarch-pkg:noarch" ||
+		items[0].Version != "0:1-1" || items[1].Name.Values[0] != "zlib:i686" ||
+		items[2].Name.Values[0] != "zlib:x86_64" {
+		t.Fatalf("unexpected RPM export: %+v", items)
+	}
+	filtered, err := manager.Export(context.Background(), packages.Packages{
+		Name: packages.PackageNames{Values: []string{"zlib:i686"}, Scalar: true},
+	})
+	if err != nil || len(filtered) != 1 || filtered[0].Name.Values[0] != "zlib:i686" {
+		t.Fatalf("filtered RPM export = %+v, %v", filtered, err)
+	}
+	if len(executor.calls) != 2 || executor.calls[0].program != "rpm" || executor.calls[0].args[0] != "-qa" {
+		t.Fatalf("Export did not use read-only local RPM inventory: %+v", executor.calls)
+	}
+}
+
+func TestExportReturnsNoRowsForEmptyRPMInventory(t *testing.T) {
+	manager := NewPackageManager(&fakeExecutor{t: t})
+	items, err := manager.Export(context.Background(), packages.Packages{})
+	if err != nil || len(items) != 0 {
+		t.Fatalf("empty RPM inventory = %+v, %v", items, err)
+	}
+}
+
 func desired(names ...string) packages.Packages {
 	return packages.Packages{Name: packages.PackageNames{Values: names, Scalar: len(names) == 1}}
 }

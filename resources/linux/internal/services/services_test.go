@@ -31,6 +31,42 @@ type fakeSystemctl struct {
 	defaultInstance           string
 }
 
+type exportSystemctl struct {
+	entries []string
+	calls   []string
+}
+
+func (f *exportSystemctl) Execute(_ context.Context, args []string) ([]byte, []byte, error) {
+	if len(args) < 4 {
+		return nil, nil, errors.New("invalid systemctl arguments")
+	}
+	operation := args[3]
+	f.calls = append(f.calls, operation)
+	if operation == "list-unit-files" {
+		if len(args) > 7 {
+			name := args[len(args)-1]
+			return []byte(name + " static -\n"), nil, nil
+		}
+		return []byte(strings.Join(f.entries, "\n") + "\n"), nil, nil
+	}
+	if operation != "show" {
+		return nil, nil, fmt.Errorf("unexpected operation %s", operation)
+	}
+	name := args[len(args)-1]
+	state := "inactive"
+	if name == "failed.service" {
+		state = "failed"
+	}
+	fileState := "disabled"
+	if name == "enabled.service" {
+		fileState = "enabled"
+	} else if name == "masked.service" {
+		fileState = "masked"
+	}
+	return []byte(fmt.Sprintf("Id=%s\nNames=%s\nActiveState=%s\nSubState=dead\nLoadState=loaded\nUnitFileState=%s\nNeedDaemonReload=no\nFragmentPath=/usr/lib/systemd/system/%s\n",
+		name, name, state, fileState, name)), nil, nil
+}
+
 func fixture(t *testing.T) (*Manager, *fakeSystemctl) {
 	t.Helper()
 	executor := &fakeSystemctl{
@@ -39,6 +75,61 @@ func fixture(t *testing.T) (*Manager, *fakeSystemctl) {
 	manager := NewManager(executor, t.TempDir())
 	executor.manager = manager
 	return manager, executor
+}
+
+func TestExportEnumeratesRepresentableUnitsDeterministically(t *testing.T) {
+	executor := &exportSystemctl{entries: []string{
+		"zeta.service disabled -", "alias.service alias -", "enabled.service enabled -",
+		"masked.service masked -",
+		"worker@.service static -", "failed.service static -", "transient.service transient -",
+	}}
+	manager := NewManager(executor, t.TempDir())
+	items, err := manager.Export(context.Background(), Unit{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		names = append(names, item.Name)
+		if item.Scope != "system" || item.Enabled == nil || item.Masked == nil {
+			t.Fatalf("missing persistent state: %+v", item)
+		}
+		if item.Name == "failed.service" && item.State != nil {
+			t.Fatalf("failed state must not be mapped to active/inactive: %+v", item)
+		}
+		if item.Name == "worker@.service" && item.State != nil {
+			t.Fatalf("template must not export runtime state: %+v", item)
+		}
+	}
+	if !slices.Equal(names, []string{"enabled.service", "failed.service", "masked.service", "worker@.service", "zeta.service"}) {
+		t.Fatalf("unexpected deterministic units: %v", names)
+	}
+	for _, item := range items {
+		if item.Name == "masked.service" && (!*item.Masked || *item.Enabled) {
+			t.Fatalf("masking and enablement were conflated: %+v", item)
+		}
+	}
+	for _, operation := range executor.calls {
+		if operation != "list-unit-files" && operation != "show" {
+			t.Fatalf("Export invoked mutating systemctl operation %q", operation)
+		}
+	}
+	filtered, err := manager.Export(context.Background(), Unit{Name: "zeta.service"})
+	if err != nil || len(filtered) != 1 || filtered[0].Name != "zeta.service" {
+		t.Fatalf("filtered export = %+v, %v", filtered, err)
+	}
+	filtered, err = manager.Export(context.Background(), Unit{Name: "zeta"})
+	if err != nil || len(filtered) != 1 || filtered[0].Name != "zeta.service" {
+		t.Fatalf("normalized name filter = %+v, %v", filtered, err)
+	}
+	user, err := manager.Export(context.Background(), Unit{Name: "zeta", Scope: "user"})
+	if err != nil || len(user) != 1 || user[0].Scope != "user" {
+		t.Fatalf("user-scope Export = %+v, %v", user, err)
+	}
+	empty, err := NewManager(&exportSystemctl{}, t.TempDir()).Export(context.Background(), Unit{})
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty unit inventory = %+v, %v", empty, err)
+	}
 }
 
 func symlink(t *testing.T, path, target string) {

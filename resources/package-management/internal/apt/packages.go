@@ -252,6 +252,96 @@ func (m *PackageManager) observe(ctx context.Context, entry resolvedPackage) (Pa
 	return state, nil
 }
 
+func (m *PackageManager) Export(ctx context.Context, filter Packages) ([]Packages, error) {
+	seenFilters := map[string]bool{}
+	for _, requested := range filter.Name.Values {
+		if seenFilters[requested] {
+			return nil, fmt.Errorf("duplicate package export filter %q", requested)
+		}
+		seenFilters[requested] = true
+		name := requested
+		if before, _, qualified := strings.Cut(requested, ":"); qualified {
+			name = before
+		}
+		if !packageToken.MatchString(name) || strings.Contains(requested, ":") &&
+			!packageArchitecture.MatchString(strings.SplitN(requested, ":", 2)[1]) {
+			return nil, fmt.Errorf("invalid package export filter %q", requested)
+		}
+	}
+	nativeOutput, err := m.run(ctx, "dpkg", "--print-architecture")
+	if err != nil {
+		return nil, err
+	}
+	native := strings.TrimSpace(string(nativeOutput))
+	if !packageArchitecture.MatchString(native) || native == "all" {
+		return nil, errors.New("dpkg returned an invalid native architecture")
+	}
+	output, err := m.run(ctx, "dpkg-query", "--show", "--showformat=${binary:Package}\t${Status}\t${Version}\t${Architecture}\n")
+	if err != nil {
+		return nil, err
+	}
+	type installedPackage struct{ name, version, architecture string }
+	var installed []installedPackage
+	archCount := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(output), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) != 4 {
+			return nil, fmt.Errorf("invalid dpkg package inventory row %q", line)
+		}
+		status := strings.Fields(fields[1])
+		if len(status) != 3 {
+			return nil, fmt.Errorf("invalid dpkg package status for %q", fields[0])
+		}
+		if (status[0] != "install" && status[0] != "hold") || status[1] != "ok" || status[2] != "installed" {
+			continue
+		}
+		name := strings.TrimSuffix(fields[0], ":"+fields[3])
+		if !packageToken.MatchString(name) || !packageArchitecture.MatchString(fields[3]) || fields[2] == "" {
+			return nil, fmt.Errorf("invalid installed dpkg package identity %q", fields[0])
+		}
+		installed = append(installed, installedPackage{name, fields[2], fields[3]})
+		archCount[name]++
+	}
+	for _, item := range installed {
+		if item.architecture == "all" && archCount[item.name] > 1 {
+			return nil, fmt.Errorf("cannot export %q installed as architecture all alongside another architecture; package identity is ambiguous", item.name)
+		}
+	}
+	slices.SortFunc(installed, func(a, b installedPackage) int {
+		if order := strings.Compare(a.name, b.name); order != 0 {
+			return order
+		}
+		return strings.Compare(a.architecture, b.architecture)
+	})
+	result := make([]Packages, 0, len(installed))
+	for _, item := range installed {
+		name := item.name
+		if item.architecture != "all" && (item.architecture != native || archCount[name] > 1) {
+			name += ":" + item.architecture
+		}
+		if filter.Name.Scalar || len(filter.Name.Values) > 0 {
+			matched := false
+			for _, requested := range filter.Name.Values {
+				if requested == name || requested == item.name || requested == item.name+":"+item.architecture {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		result = append(result, Packages{
+			Name:    PackageNames{Values: []string{name}, Scalar: true},
+			Version: item.version,
+		})
+	}
+	return result, nil
+}
+
 func packageActive(state PackageState) bool {
 	fields := strings.Fields(state.Status)
 	return len(fields) == 3 && fields[2] != "not-installed" && fields[2] != "config-files"

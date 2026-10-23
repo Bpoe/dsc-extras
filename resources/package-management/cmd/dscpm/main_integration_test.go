@@ -38,6 +38,23 @@ func TestDSCStateAndDiffIntegration(t *testing.T) {
 	}
 }
 
+func TestDSCPackagesExportIntegration(t *testing.T) {
+	store := makeStore(t)
+	t.Setenv("DSCAPT_TEST_ROOT", store.Root)
+	dsc, resourceType := prepareDSCResource(t, "packages.dsc.resource.json")
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	for _, args := range [][]string{
+		{"resource", "export", "--resource", resourceType, "--output-format", "json"},
+		{"resource", "get", "--all", "--resource", resourceType, "--output-format", "json"},
+	} {
+		output, err := exec.CommandContext(ctx, dsc, args...).Output()
+		if err != nil || !json.Valid(output) {
+			t.Fatalf("DSC %s failed to consume package Export: %v\n%s", strings.Join(args, " "), err, output)
+		}
+	}
+}
+
 func TestDSCAvailabilityPolicy(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
@@ -91,7 +108,7 @@ func prepareDSCResource(t *testing.T, manifestName string) (string, string) {
 	if err := json.Unmarshal(manifest["type"], &resourceType); err != nil {
 		t.Fatal(err)
 	}
-	for _, operation := range []string{"get", "test", "set"} {
+	for _, operation := range []string{"get", "test", "set", "export"} {
 		var command struct {
 			Executable        string   `json:"executable"`
 			Args              []string `json:"args"`
@@ -151,6 +168,15 @@ func testDSCOperations(t *testing.T, dsc, resourceType string) {
 			}
 
 			t.Setenv("DSCAPT_TEST_ROOT", store.Root)
+			for _, args := range [][]string{
+				{"resource", "export", "--resource", resourceType, "--output-format", "json"},
+				{"resource", "get", "--all", "--resource", resourceType, "--output-format", "json"},
+			} {
+				output, err := exec.CommandContext(t.Context(), dsc, args...).Output()
+				if err != nil || !json.Valid(output) || !bytes.Contains(output, []byte("packages.example.org")) {
+					t.Fatalf("DSC %s failed to consume repository Export: %v\n%s", strings.Join(args, " "), err, output)
+				}
+			}
 			input, err := json.Marshal(desired)
 			if err != nil {
 				t.Fatal(err)

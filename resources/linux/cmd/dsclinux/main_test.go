@@ -40,6 +40,20 @@ func (f *fakeManager) Get(_ context.Context, desired services.Unit) (services.Un
 	return actual, f.err
 }
 
+func (f *fakeManager) Export(_ context.Context, filter services.Unit) ([]services.Unit, error) {
+	if filter.Name != "" && filter.Name != f.actual.Name {
+		return []services.Unit{}, nil
+	}
+	actual := f.actual
+	if actual.Name == "" {
+		actual = newFakeManager().actual
+	}
+	if filter.Scope != "" {
+		actual.Scope = filter.Scope
+	}
+	return []services.Unit{actual}, f.err
+}
+
 func (f *fakeManager) Test(ctx context.Context, desired services.Unit) (services.Unit, []string, error) {
 	actual, err := f.Get(ctx, desired)
 	differences := []string{}
@@ -125,6 +139,32 @@ func TestCLIContract(t *testing.T) {
 	}
 }
 
+func TestServiceExportWritesJSONLinesAndSupportsIdentityFilter(t *testing.T) {
+	manager := newFakeManager()
+	for _, test := range []struct {
+		input string
+		count int
+	}{
+		{"", 1},
+		{`{"name":"example","scope":"user"}`, 1},
+		{`{"name":"missing"}`, 0},
+	} {
+		code, stdout, stderr := call(t, manager, []string{"services", "export"}, test.input)
+		lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
+		if test.count == 0 {
+			if stdout != "" || code != 0 || stderr != "" {
+				t.Fatalf("empty Export = %d %q %q", code, stdout, stderr)
+			}
+			continue
+		}
+		var actual services.Unit
+		if code != 0 || stderr != "" || len(lines) != 1 || json.Unmarshal([]byte(lines[0]), &actual) != nil ||
+			actual.Name != "example" {
+			t.Fatalf("invalid JSON Lines Export = %d %q %q", code, stdout, stderr)
+		}
+	}
+}
+
 func TestInputAndErrors(t *testing.T) {
 	for _, input := range []string{"", "{", "[]", `{"name":"a"} {}`, `{"name":"a","enabled":"true"}`, strings.Repeat(" ", maxInputBytes+1)} {
 		code, stdout, stderr := call(t, newFakeManager(), []string{"services", "get"}, input)
@@ -156,7 +196,12 @@ func TestManifest(t *testing.T) {
 	var manifest struct {
 		Type    string
 		Version string
-		Get     struct {
+		Export  struct {
+			Executable string
+			Args       []string
+			Input      string
+		}
+		Get struct {
 			Executable string
 			Args       []string
 			Input      string
@@ -186,6 +231,8 @@ func TestManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	if manifest.Type != "DscExtras.Linux/services" || manifest.Version != version ||
+		manifest.Export.Executable != "dsclinux" ||
+		!slices.Equal(manifest.Export.Args, []string{"services", "export"}) || manifest.Export.Input != "stdin" ||
 		manifest.Get.Executable != "dsclinux" || manifest.Test.Executable != "dsclinux" || manifest.Set.Executable != "dsclinux" ||
 		!slices.Equal(manifest.Get.Args, []string{"services", "get"}) ||
 		!slices.Equal(manifest.Test.Args, []string{"services", "test"}) ||

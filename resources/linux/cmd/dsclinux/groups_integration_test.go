@@ -68,7 +68,7 @@ func TestDSCGroupsIntegration(t *testing.T) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	for _, operation := range []string{"get", "test", "set"} {
+	for _, operation := range []string{"get", "test", "set", "export"} {
 		var command map[string]any
 		if err := json.Unmarshal(manifest[operation], &command); err != nil {
 			t.Fatal(err)
@@ -176,6 +176,15 @@ func TestDSCGroupsIntegration(t *testing.T) {
 		t.Fatalf("schema rejection invoked Set: %v", err)
 	}
 	assertState(invoke("set", `{"name":"dev","gid":3000,"members":["old","bob"]}`), "afterState", "Present", []string{"bob", "old"})
+	for _, args := range [][]string{
+		{"resource", "export", "--resource", resourceType, "--output-format", "json"},
+		{"resource", "get", "--all", "--resource", resourceType, "--output-format", "json"},
+	} {
+		output, err := exec.CommandContext(ctx, dsc, args...).Output()
+		if err != nil || !json.Valid(output) || !bytes.Contains(output, []byte("dev")) {
+			t.Fatalf("DSC %s failed to consume Export: %v\n%s", strings.Join(args, " "), err, output)
+		}
+	}
 	assertDiff(`{"name":"dev","includedMembers":["alice"],"excludedMembers":["old"]}`, []string{"includedMembers", "excludedMembers"})
 	assertState(invoke("set", `{"name":"dev","includedMembers":["alice"],"excludedMembers":["old"],"future":42}`),
 		"afterState", "Present", []string{"alice", "bob"})

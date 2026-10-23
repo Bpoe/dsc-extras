@@ -315,6 +315,44 @@ func (m *Manager) Get(_ context.Context, desired Group) (Group, error) {
 	return m.observe(desired.Name)
 }
 
+func (m *Manager) Export(_ context.Context, filter Group) ([]Group, error) {
+	if filter.Name != "" && !validName(filter.Name) {
+		return nil, errors.New("name must be a literal local group name")
+	}
+	data, err := os.ReadFile(filepath.Join(m.root, "etc", "group"))
+	if err != nil {
+		return nil, fmt.Errorf("read local group database: %w", err)
+	}
+	names := map[string]bool{}
+	for index, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) != 4 || !validName(fields[0]) {
+			return nil, fmt.Errorf("invalid group database entry at line %d", index+1)
+		}
+		names[fields[0]] = true
+	}
+	ordered := make([]string, 0, len(names))
+	for name := range names {
+		if filter.Name == "" || filter.Name == name {
+			ordered = append(ordered, name)
+		}
+	}
+	slices.Sort(ordered)
+	result := make([]Group, 0, len(ordered))
+	for _, name := range ordered {
+		actual, err := m.observe(name)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, actual)
+	}
+	return result, nil
+}
+
 func (m *Manager) Test(ctx context.Context, desired Group) (Group, []string, error) {
 	desired, err := normalize(desired)
 	if err != nil {

@@ -4,6 +4,11 @@
   "version": "0.1.0",
   "description": "Manage packages using native APT/dpkg or install packages using DNF/RPM",
   "kind": "resource",
+  "export": {
+    "executable": "dscpm",
+    "args": ["packages", "export"],
+    "input": "stdin"
+  },
   "get": {
     "executable": "dscpm",
     "args": ["packages", "get"],

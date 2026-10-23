@@ -4,6 +4,11 @@
   "version": "0.1.0",
   "description": "Manage local Linux group existence, numeric GID and supplementary membership",
   "kind": "resource",
+  "export": {
+    "executable": "dsclinux",
+    "args": ["groups", "export"],
+    "input": "stdin"
+  },
   "get": {
     "executable": "dsclinux",
     "args": ["groups", "get"],

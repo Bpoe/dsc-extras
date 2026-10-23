@@ -87,6 +87,53 @@ func packageVersion(version string) packageStep {
 	return packageStep{program: "dpkg", args: []string{"--validate-version", version}}
 }
 
+func TestExportUsesInstalledDpkgInventoryAndArchitectureIdentity(t *testing.T) {
+	inventoryArgs := []string{"--show", "--showformat=${binary:Package}\t${Status}\t${Version}\t${Architecture}\n"}
+	inventory := "libfoo:arm64\tinstall ok installed\t2:1.0-3\tarm64\n" +
+		"adduser\tinstall ok installed\t3.137\tall\n" +
+		"libfoo:amd64\thold ok installed\t2:1.0-3\tamd64\n" +
+		"stale\tdeinstall ok config-files\t1.0\tamd64\n"
+	manager := packageManagerFixture(t,
+		packageStep{program: "dpkg", args: []string{"--print-architecture"}, stdout: "amd64\n"},
+		packageStep{program: "dpkg-query", args: inventoryArgs, stdout: inventory},
+	)
+	items, err := manager.Export(context.Background(), Packages{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("Export returned %+v", items)
+	}
+	gotNames := []string{items[0].Name.Values[0], items[1].Name.Values[0], items[2].Name.Values[0]}
+	if !slices.Equal(gotNames, []string{"adduser", "libfoo:amd64", "libfoo:arm64"}) ||
+		items[0].Version != "3.137" || items[1].Version != "2:1.0-3" {
+		t.Fatalf("unexpected package export: %+v", items)
+	}
+	filtered := packageManagerFixture(t,
+		packageStep{program: "dpkg", args: []string{"--print-architecture"}, stdout: "amd64\n"},
+		packageStep{program: "dpkg-query", args: inventoryArgs, stdout: inventory},
+	)
+	filteredItems, err := filtered.Export(context.Background(), Packages{
+		Name: PackageNames{Values: []string{"libfoo:arm64"}, Scalar: true},
+	})
+	if err != nil || len(filteredItems) != 1 || filteredItems[0].Name.Values[0] != "libfoo:arm64" {
+		t.Fatalf("filtered Export = %+v, %v", filteredItems, err)
+	}
+}
+
+func TestExportReturnsNoRowsForEmptyDpkgInventory(t *testing.T) {
+	manager := packageManagerFixture(t,
+		packageStep{program: "dpkg", args: []string{"--print-architecture"}, stdout: "amd64\n"},
+		packageStep{program: "dpkg-query", args: []string{
+			"--show", "--showformat=${binary:Package}\t${Status}\t${Version}\t${Architecture}\n",
+		}},
+	)
+	items, err := manager.Export(context.Background(), Packages{})
+	if err != nil || len(items) != 0 {
+		t.Fatalf("empty dpkg inventory = %+v, %v", items, err)
+	}
+}
+
 func packageComparison(left, operator, right string, equal bool) packageStep {
 	step := packageStep{program: "dpkg", args: []string{"--compare-versions", left, operator, right}}
 	if !equal {
