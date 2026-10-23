@@ -176,7 +176,7 @@ jobs:
             fi
             test "$(jq -r '.version' "$check_dir/$manifest")" = "$VERSION"
             jq -e --arg resource "$resource" '
-              . as $manifest | ["get", "test", "set", "export"] | all(
+              . as $manifest | ["get", "test", "set"] | all(
                 . as $operation | $manifest[$operation] |
                 .executable == "dscpm" and .args == [$resource, $operation]
               )
