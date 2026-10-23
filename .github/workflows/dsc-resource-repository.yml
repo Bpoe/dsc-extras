@@ -1,0 +1,77 @@
+name: DSC Resource Repository
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/dsc-resource-repository.yml'
+      - 'scripts/build-dsc-resource-repository.sh'
+      - 'scripts/smoke-test-dsc-resource-repository.sh'
+      - 'docs/dsc-resource-repository.md'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/dsc-resource-repository.yml'
+      - 'scripts/build-dsc-resource-repository.sh'
+      - 'scripts/smoke-test-dsc-resource-repository.sh'
+      - 'docs/dsc-resource-repository.md'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages-dsc-resource-repository
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch pinned dscpkg publisher source
+        uses: actions/checkout@v4
+        with:
+          repository: Bpoe/dscpkg
+          ref: 9610ddab3beb1ed02e43342c6b75197183b67922
+          path: .dscpkg-src
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .dscpkg-src/go.mod
+          cache-dependency-path: .dscpkg-src/go.mod
+      - name: Build dscpkg
+        working-directory: .dscpkg-src
+        run: go build -trimpath -o "$RUNNER_TEMP/dscpkg" ./cmd/dscpkg
+      - name: Generate resource repository from published releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DSCPKG: ${{ runner.temp }}/dscpkg
+        run: |
+          bash scripts/build-dsc-resource-repository.sh site
+      - name: Smoke-test resolution and shared package storage
+        env:
+          DSCPKG: ${{ runner.temp }}/dscpkg
+        run: bash scripts/smoke-test-dsc-resource-repository.sh
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    if: github.event_name != 'pull_request' && (github.event_name != 'release' || startsWith(github.event.release.tag_name, 'dsclinux-v') || startsWith(github.event.release.tag_name, 'dscpm-v'))
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
