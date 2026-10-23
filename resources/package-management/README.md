@@ -1,8 +1,8 @@
 # dscpm: Package management component
 
 `dscpm` is the package management component in `resources/package-management`,
-with its executable entry point in `cmd/dscpm`. It currently implements `Get`,
-`Test`, and `Set` for the DSCv3 resources
+with its executable entry point in `cmd/dscpm`. It implements `Get`, `Test`,
+`Set`, and native DSC v3 Export for the resources
 `DscExtras.PackageManagement/aptRepositories` and
 `DscExtras.PackageManagement/packages`. The repository resource manages a logical binary-package (`deb`)
 repository. A declaration adopts and reconciles its named source file,
@@ -22,8 +22,7 @@ The manifest
 `manifests/aptRepositories.dsc.resource.json` exposes
 `DscExtras.PackageManagement/aptRepositories`. The compatibility manifest
 `manifests/dscapt.dsc.resource.json` preserves `DscExtras.Apt/Repository` for
-existing DSC configurations. Both invoke `dscpm aptRepositories get`, `test`,
-and `set`. There is no `dscapt` binary shim: old direct CLI invocations and
+existing DSC configurations. Both invoke the same `dscpm aptRepositories` handlers, including Export. There is no `dscapt` binary shim: old direct CLI invocations and
 build paths must migrate to the new command and directory.
 
 ## Command line and installation
@@ -39,7 +38,42 @@ dscpm aptRepositories set < repository.json
 dscpm packages get < packages.json
 dscpm packages test < packages.json
 dscpm packages set < packages.json
+dscpm aptRepositories export
+dscpm packages export
 ```
+
+### Export
+
+DSC assembles resource instances emitted as JSON Lines by the read-only Export
+commands:
+
+```bash
+dsc resource export --resource DscExtras.PackageManagement/aptRepositories
+dsc resource export --resource DscExtras.PackageManagement/packages
+```
+
+The legacy `DscExtras.Apt/Repository` manifest uses the same repository
+enumerator. DSC's `--input`/`--file` filters use resource properties:
+repository filters identify an exact `name`, `uri`, and `suite`; package filters
+match one or more package names, optionally architecture-qualified.
+
+APT repositories are discovered from `sources.list`, `.list`, and `.sources`
+files, then combined by normalized URI and suite. Export labels are stable
+`repo-<hash>` names because filenames are not repository identity. Deb822
+multi-value fields are expanded according to their Types/URIs/Suites
+combinations. Ambiguous definitions, unsupported options, or malformed source
+files fail Export rather than producing guessed state. Because this resource
+requires an explicit `signingKey` to reconcile a present repository, definitions
+using global trust or an unreadable/missing keyring are reported as
+unrepresentable rather than exported without their trust semantics. Readable
+explicit signing keys are exported.
+
+Packages are enumerated from the local dpkg or RPM database without refreshing
+metadata or contacting repositories. Each installed package is a separate
+resource instance with its exact observed version; architecture is included
+where needed to preserve package identity. Exported resources can be placed
+directly in a DSC configuration or piped through DSC's `resource export`
+output options.
 
 Install `dscpm`, `aptRepositories.dsc.resource.json`,
 `dscapt.dsc.resource.json`, and `packages.dsc.resource.json` together in a directory on `PATH`, with all manifests

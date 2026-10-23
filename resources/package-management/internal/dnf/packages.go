@@ -16,6 +16,45 @@ func (m *PackageManager) Get(ctx context.Context, desired packages.Packages) (pa
 	return result, err
 }
 
+func (m *PackageManager) Export(ctx context.Context, filter packages.Packages) ([]packages.Packages, error) {
+	seenFilters := map[string]bool{}
+	for _, requested := range filter.Name.Values {
+		if seenFilters[requested] {
+			return nil, fmt.Errorf("duplicate package export filter %q", requested)
+		}
+		seenFilters[requested] = true
+		name, arch, qualified := strings.Cut(requested, ":")
+		if !nameToken.MatchString(name) || qualified && !archToken.MatchString(arch) {
+			return nil, fmt.Errorf("invalid package export filter %q", requested)
+		}
+	}
+	inventory, err := m.inventory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]packages.Packages, 0, len(inventory))
+	for _, item := range inventory {
+		name := item.name + ":" + item.arch
+		if filter.Name.Scalar || len(filter.Name.Values) > 0 {
+			matched := false
+			for _, requested := range filter.Name.Values {
+				if requested == item.name || requested == name {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		result = append(result, packages.Packages{
+			Name:    packages.PackageNames{Values: []string{name}, Scalar: true},
+			Version: item.evr(),
+		})
+	}
+	return result, nil
+}
+
 func (m *PackageManager) Test(ctx context.Context, desired packages.Packages) (packages.Packages, []string, error) {
 	desired, entries, err := m.resolve(ctx, desired)
 	if err != nil {

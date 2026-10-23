@@ -4,6 +4,11 @@
   "version": "0.1.0",
   "description": "Manage Linux systemd unit activation, persistent enablement and persistent masking independently",
   "kind": "resource",
+  "export": {
+    "executable": "dsclinux",
+    "args": ["services", "export"],
+    "input": "stdin"
+  },
   "get": {
     "executable": "dsclinux",
     "args": ["services", "get"],

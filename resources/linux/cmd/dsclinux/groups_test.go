@@ -30,6 +30,14 @@ func (f *fakeGroupManager) Get(_ context.Context, desired groups.Group) (groups.
 	return actual, f.err
 }
 
+func (f *fakeGroupManager) Export(_ context.Context, filter groups.Group) ([]groups.Group, error) {
+	if filter.Name != "" && filter.Name != f.actual.Name {
+		return []groups.Group{}, nil
+	}
+	actual := f.actual
+	return []groups.Group{actual}, f.err
+}
+
 func (f *fakeGroupManager) Test(ctx context.Context, desired groups.Group) (groups.Group, []string, error) {
 	actual, err := f.Get(ctx, desired)
 	diff := []string{}
@@ -183,7 +191,11 @@ func TestGroupsManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	var manifest struct {
-		Type, Version  string
+		Type, Version string
+		Export        struct {
+			Executable, Input string
+			Args              []string
+		}
 		Get, Test, Set struct {
 			Executable, Input, Return string
 			Args                      []string
@@ -201,7 +213,9 @@ func TestGroupsManifest(t *testing.T) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if manifest.Type != "DscExtras.Linux/groups" || manifest.Version != version {
+	if manifest.Type != "DscExtras.Linux/groups" || manifest.Version != version ||
+		manifest.Export.Executable != "dsclinux" || manifest.Export.Input != "stdin" ||
+		!slices.Equal(manifest.Export.Args, []string{"groups", "export"}) {
 		t.Fatalf("incorrect type/version: %s", data)
 	}
 	for _, operation := range []struct {
@@ -219,6 +233,7 @@ func TestGroupsManifest(t *testing.T) {
 			t.Fatalf("incorrect manifest dispatch: %+v", operation)
 		}
 	}
+
 	schema := manifest.Schema.Embedded
 	if manifest.Test.Return != "stateAndDiff" || manifest.Set.Return != "state" || !manifest.Set.ImplementsPretest ||
 		!schema.AdditionalProperties || !slices.Equal(schema.Required, []string{"name"}) ||
@@ -232,6 +247,32 @@ func TestGroupsManifest(t *testing.T) {
 		}
 		if property != "gid" && schema.Properties[property]["uniqueItems"] != true {
 			t.Fatalf("%s must require uniqueness", property)
+		}
+	}
+}
+
+func TestGroupsExportWritesJSONLinesAndFiltersByName(t *testing.T) {
+	manager := newFakeGroupManager()
+	manager.actual = groups.Group{Name: "dev", Ensure: "Present", GID: pointer(int64(2000))}
+	for _, test := range []struct {
+		input string
+		count int
+	}{
+		{"", 1},
+		{`{"name":"dev"}`, 1},
+		{`{"name":"missing"}`, 0},
+	} {
+		code, stdout, stderr := callGroups(t, manager, "export", test.input)
+		if test.count == 0 {
+			if code != 0 || stdout != "" || stderr != "" {
+				t.Fatalf("empty Export = %d %q %q", code, stdout, stderr)
+			}
+			continue
+		}
+		var actual groups.Group
+		if code != 0 || stderr != "" || json.Unmarshal([]byte(strings.TrimSpace(stdout)), &actual) != nil ||
+			actual.Name != "dev" {
+			t.Fatalf("invalid JSON Lines Export = %d %q %q", code, stdout, stderr)
 		}
 	}
 }

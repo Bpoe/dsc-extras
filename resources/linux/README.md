@@ -2,6 +2,7 @@
 
 `dsclinux` provides the DSC v3 resources `DscExtras.Linux/services` for managing
 Linux systemd units and `DscExtras.Linux/groups` for managing local groups.
+Both resources support native DSC v3 Export.
 Services, timers, sockets, mounts, targets, and other systemd
 unit types are supported. Names without a recognized unit-type suffix resolve to
 `.service`.
@@ -187,6 +188,35 @@ printf '%s\n' '{"name":"docker"}' | dsclinux services get
 printf '%s\n' '{"name":"docker","state":"active"}' | dsclinux services test
 printf '%s\n' '{"name":"docker","enabled":false}' | dsclinux services set
 dsclinux --help
+```
+
+### Export
+
+Use DSC to enumerate observed instances and assemble them into a configuration
+document:
+
+```bash
+dsc resource export --resource DscExtras.Linux/groups
+dsc resource export --resource DscExtras.Linux/services
+```
+
+Export emits JSON Lines from `dsclinux`; DSC owns the resulting configuration
+document. An optional resource-shaped filter can be supplied with DSC's
+`--input` or `--file` options. Groups match the exact `name`; services match
+the exact `name` and `scope` (`system` by default). Both exports are sorted
+deterministically and are read-only.
+
+Groups are enumerated from `/etc/group`; NSS-only groups are not exported.
+Services enumerate unit files visible to the selected systemd manager, omit
+aliases and transient/generated units, and export only `active`/`inactive`
+states when systemd reports those exact states. The default scope is `system`;
+select `scope: user` to enumerate the calling user's manager. A user manager
+must be available in the current login session.
+
+Exported instances can be reused directly in a DSC configuration, for example:
+
+```bash
+dsc resource export --resource DscExtras.Linux/groups > groups.dsc.yaml
 ```
 
 Get and Set emit one observed-state JSON object. Test emits the observed state

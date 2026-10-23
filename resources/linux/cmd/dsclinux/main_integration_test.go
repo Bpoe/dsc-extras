@@ -69,7 +69,7 @@ func TestDSCIntegration(t *testing.T) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	for _, operation := range []string{"get", "test", "set"} {
+	for _, operation := range []string{"get", "test", "set", "export"} {
 		var command map[string]any
 		if err := json.Unmarshal(manifest[operation], &command); err != nil {
 			t.Fatal(err)
@@ -137,6 +137,16 @@ func TestDSCIntegration(t *testing.T) {
 					t.Fatalf("DSC output: %s (%v)", output, err)
 				}
 				return result
+			}
+			for _, args := range [][]string{
+				{"resource", "export", "--resource", resourceType, "--output-format", "json"},
+				{"resource", "get", "--all", "--resource", resourceType, "--output-format", "json"},
+			} {
+				command := exec.CommandContext(ctx, dsc, args...)
+				output, err := command.Output()
+				if err != nil || !json.Valid(output) || !bytes.Contains(output, []byte("example")) {
+					t.Fatalf("DSC %s failed to consume Export: %v\n%s", strings.Join(args, " "), err, output)
+				}
 			}
 			desired := `{"name":"example","state":"active","enabled":true,"masked":true,"futureProperty":42}`
 			get := invoke("get", `{"name":"example"}`)
