@@ -7,7 +7,18 @@
   "export": {
     "executable": "dsclinux",
     "args": ["services", "export"],
-    "input": "stdin"
+    "input": "stdin",
+    "schema": {
+      "embedded": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": {"type": "string", "minLength": 1, "maxLength": 255},
+          "scope": {"type": "string", "enum": ["system", "user"]}
+        },
+        "additionalProperties": true
+      }
+    }
   },
   "get": {
     "executable": "dsclinux",

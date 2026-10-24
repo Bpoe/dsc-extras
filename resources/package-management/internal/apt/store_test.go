@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -90,6 +91,56 @@ func TestExportReturnsNoRowsForEmptySources(t *testing.T) {
 	items, err := newTestStore(t).Export(Repository{})
 	if err != nil || len(items) != 0 {
 		t.Fatalf("empty source inventory = %+v, %v", items, err)
+	}
+}
+
+func TestExportFiltersByLogicalIdentityNotManagementLabel(t *testing.T) {
+	for _, source := range []string{"sources.list", "sources.list.d/docker.list", "sources.list.d/docker.sources", "sources.list.d/vendor.sources"} {
+		t.Run(source, func(t *testing.T) {
+			store := newTestStore(t)
+			key, err := os.ReadFile(filepath.Join("testdata", "docker.asc"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			writePublicKeyring(t, store, "trusted", string(key))
+			content := "deb [signed-by=/etc/apt/keyrings/trusted.gpg] https://download.docker.com/linux/debian stable main\n"
+			if strings.HasSuffix(source, ".sources") {
+				content = "Types: deb\nURIs: https://download.docker.com/linux/debian\nSuites: stable\nComponents: main\nSigned-By: /etc/apt/keyrings/trusted.gpg\n"
+			}
+			fixtureFile(t, store, "/etc/apt/"+source, content)
+			// A label collision must not select a different repository by filename.
+			fixtureFile(t, store, "/etc/apt/sources.list.d/requested.sources",
+				"Types: deb\nURIs: https://unrelated.example\nSuites: stable\nComponents: main\nSigned-By: /etc/apt/keyrings/trusted.gpg\n")
+			before := snapshot(t, store.Root)
+			all, err := store.Export(Repository{})
+			if err != nil || len(all) != 2 {
+				t.Fatalf("unfiltered Export = %+v, %v", all, err)
+			}
+			for _, name := range []string{"docker", "requested", "arbitrary-label", all[0].Name} {
+				items, err := store.Export(Repository{Name: name, URI: "https://download.docker.com/linux/debian/", Suite: "stable"})
+				if err != nil || len(items) != 1 || !reflect.DeepEqual(items[0], all[0]) {
+					t.Fatalf("Export with label %q = %+v, %v; want %+v", name, items, err, all[0])
+				}
+				desired := items[0]
+				if err := ValidateDesired(&desired); err != nil {
+					t.Fatalf("Export is not reusable desired state: %v", err)
+				}
+				_, diff, err := store.Test(desired)
+				if err != nil || len(diff) != 0 {
+					t.Fatalf("exported configuration does not match source: %v, %v", diff, err)
+				}
+			}
+			for _, filter := range []Repository{
+				{Name: "docker", URI: "https://missing.example", Suite: "stable"},
+				{Name: "docker", URI: "https://download.docker.com/linux/debian", Suite: "missing"},
+			} {
+				items, err := store.Export(filter)
+				if err != nil || len(items) != 0 {
+					t.Fatalf("nonmatching Export = %+v, %v", items, err)
+				}
+			}
+			assertUnchanged(t, before, snapshot(t, store.Root))
+		})
 	}
 }
 

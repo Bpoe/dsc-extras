@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,9 +50,89 @@ func TestDSCPackagesExportIntegration(t *testing.T) {
 		{"resource", "get", "--all", "--resource", resourceType, "--output-format", "json"},
 	} {
 		output, err := exec.CommandContext(ctx, dsc, args...).Output()
-		if err != nil || !json.Valid(output) {
+		if err != nil {
 			t.Fatalf("DSC %s failed to consume package Export: %v\n%s", strings.Join(args, " "), err, output)
 		}
+		decoder := json.NewDecoder(bytes.NewReader(output))
+		for {
+			var instance map[string]json.RawMessage
+			err := decoder.Decode(&instance)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("DSC %s returned invalid JSON/JSON Lines: %v\n%s", strings.Join(args, " "), err, output)
+			}
+		}
+	}
+}
+
+func TestDSCRepositoryExportFilterIntegration(t *testing.T) {
+	for _, manifest := range []string{"aptRepositories.dsc.resource.json", "dscapt.dsc.resource.json"} {
+		t.Run(manifest, func(t *testing.T) {
+			dsc, resourceType := prepareDSCResource(t, manifest)
+			for _, source := range []string{"external.sources", "docker.sources", "sources.list"} {
+				t.Run(source, func(t *testing.T) {
+					store := makeStore(t)
+					desired := externalRepository(t, store, ".gpg")
+					path := filepath.Join(store.Root, "etc", "apt", "sources.list.d", "external.sources")
+					content, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if source == "sources.list" {
+						if err := os.Remove(path); err != nil {
+							t.Fatal(err)
+						}
+						path = filepath.Join(store.Root, "etc", "apt", source)
+						content = []byte("deb [arch=arm64,amd64 signed-by=/usr/share/keyrings/external.gpg] https://packages.example.org/debian/ stable contrib main\n")
+						if err := os.WriteFile(path, content, 0644); err != nil {
+							t.Fatal(err)
+						}
+					} else if source != "external.sources" {
+						newPath := filepath.Join(filepath.Dir(path), source)
+						if err := os.Rename(path, newPath); err != nil {
+							t.Fatal(err)
+						}
+						path = newPath
+					}
+					t.Setenv("DSCAPT_TEST_ROOT", store.Root)
+					for _, label := range []string{"docker", "management-label"} {
+						input, err := json.Marshal(map[string]string{"name": label, "uri": desired.URI, "suite": desired.Suite})
+						if err != nil {
+							t.Fatal(err)
+						}
+						command := exec.CommandContext(t.Context(), dsc, "resource", "export", "--resource", resourceType,
+							"--file", "-", "--output-format", "json")
+						command.Stdin = bytes.NewReader(input)
+						var stderr strings.Builder
+						command.Stderr = &stderr
+						output, err := command.Output()
+						if err != nil {
+							t.Fatalf("DSC Export filter %s: %v\n%s\n%s", input, err, output, stderr.String())
+						}
+						var config struct {
+							Resources []struct {
+								Properties apt.Repository
+							}
+						}
+						if err := json.Unmarshal(output, &config); err != nil || len(config.Resources) != 1 {
+							t.Fatalf("filtered Export = %s, %v", output, err)
+						}
+						exported := config.Resources[0].Properties
+						if err := apt.ValidateDesired(&exported); err != nil {
+							t.Fatalf("Export is not reusable desired state: %+v, %v", exported, err)
+						}
+						if _, diff, err := store.Test(exported); err != nil || len(diff) != 0 {
+							t.Fatalf("Export differs from existing source: %v, %v", diff, err)
+						}
+					}
+					if after, err := os.ReadFile(path); err != nil || !bytes.Equal(content, after) {
+						t.Fatalf("Export modified source: %v", err)
+					}
+				})
+			}
+		})
 	}
 }
 

@@ -198,18 +198,25 @@ document:
 ```bash
 dsc resource export --resource DscExtras.Linux/groups
 dsc resource export --resource DscExtras.Linux/services
+dsc resource export --resource DscExtras.Linux/services --input '{"scope":"user"}'
 ```
 
 Export emits JSON Lines from `dsclinux`; DSC owns the resulting configuration
 document. An optional resource-shaped filter can be supplied with DSC's
 `--input` or `--file` options. Groups match the exact `name`; services match
-the exact `name` and `scope` (`system` by default). Both exports are sorted
+the optional exact `name` and `scope` (`system` by default). A scope-only filter
+enumerates all units in that manager without requiring a name. Get, Test, and
+Set still require `name`. Both exports are sorted
 deterministically and are read-only.
 
 Groups are enumerated from `/etc/group`; NSS-only groups are not exported.
 Services enumerate unit files visible to the selected systemd manager, omit
 aliases and transient/generated units, and export only `active`/`inactive`
-states when systemd reports those exact states. The default scope is `system`;
+states when systemd reports those exact states. Export includes only configurable
+properties (`name`, `scope`, representable `state`, `enabled`, and `masked`);
+Get's read-only diagnostics are not included. Failed and transitional units
+retain their persistent enablement and masking without a guessed runtime state.
+The default scope is `system`;
 select `scope: user` to enumerate the calling user's manager. A user manager
 must be available in the current login session.
 

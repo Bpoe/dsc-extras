@@ -239,7 +239,10 @@ func (m *Manager) Export(ctx context.Context, filter Unit) ([]Unit, error) {
 		if actual.LoadState == "not-found" || actual.UnitFileState == "alias" {
 			continue
 		}
-		result = append(result, actual)
+		result = append(result, Unit{
+			Name: actual.Name, Scope: actual.Scope, State: actual.State,
+			Enabled: actual.Enabled, Masked: actual.Masked,
+		})
 	}
 	return result, nil
 }

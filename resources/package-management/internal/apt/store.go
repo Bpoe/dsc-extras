@@ -330,7 +330,8 @@ func (s Store) Export(filter Repository) ([]Repository, error) {
 	for _, identity := range ordered {
 		sum := sha256.Sum256([]byte(identity.uri + "\x00" + identity.suite))
 		name := "repo-" + hex.EncodeToString(sum[:])
-		if filtered && (repositoryURI(filter.URI) != identity.uri || filter.Suite != identity.suite || filter.Name != name) {
+		// Name is a management label, not part of the logical repository identity.
+		if filtered && (repositoryURI(filter.URI) != identity.uri || filter.Suite != identity.suite) {
 			continue
 		}
 		selector := Repository{Name: name, URI: identity.uri, Suite: identity.suite}

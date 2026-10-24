@@ -54,7 +54,10 @@ dsc resource export --resource DscExtras.PackageManagement/packages
 
 The legacy `DscExtras.Apt/Repository` manifest uses the same repository
 enumerator. DSC's `--input`/`--file` filters use resource properties:
-repository filters identify an exact `name`, `uri`, and `suite`; package filters
+repository filters supply `name`, `uri`, and `suite`, matching the normalized URI
+and exact suite. `name` is a management label, not an identity constraint, so a
+normal label such as `docker` works regardless of the source filename or
+generated Export label. Package filters
 match one or more package names, optionally architecture-qualified.
 
 APT repositories are discovered from `sources.list`, `.list`, and `.sources`
