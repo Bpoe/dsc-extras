@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -34,7 +36,11 @@ func TestDSCResourceProcess(t *testing.T) {
 		if arg != "--" {
 			continue
 		}
-		code := run(t.Context(), os.Args[i+1:], os.Stdin, os.Stdout, os.Stderr, manager, nil)
+		var resource serviceManager = manager
+		if slices.Equal(os.Args[i+1:], []string{"services", "export"}) {
+			resource = services.NewManager(integrationSystemctl{manager.actual}, filepath.Dir(path))
+		}
+		code := run(t.Context(), os.Args[i+1:], os.Stdin, os.Stdout, os.Stderr, resource, nil)
 		if manager.sets > 0 {
 			data, err := json.Marshal(manager.actual)
 			if err != nil {
@@ -47,6 +53,20 @@ func TestDSCResourceProcess(t *testing.T) {
 		os.Exit(code)
 	}
 	t.Fatal("missing resource arguments")
+}
+
+type integrationSystemctl struct{ actual services.Unit }
+
+func (f integrationSystemctl) Execute(_ context.Context, args []string) ([]byte, []byte, error) {
+	switch args[3] {
+	case "list-unit-files":
+		return []byte("example.service disabled -\nother.service disabled -\n"), nil, nil
+	case "show":
+		return []byte(fmt.Sprintf("ActiveState=%s\nSubState=%s\nLoadState=%s\nUnitFileState=%s\n",
+			f.actual.ActiveState, f.actual.SubState, f.actual.LoadState, f.actual.UnitFileState)), nil, nil
+	default:
+		return nil, nil, fmt.Errorf("unexpected mutating systemctl invocation: %v", args)
+	}
 }
 
 func TestDSCIntegration(t *testing.T) {
@@ -69,7 +89,7 @@ func TestDSCIntegration(t *testing.T) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	for _, operation := range []string{"get", "test", "set"} {
+	for _, operation := range []string{"get", "test", "set", "export"} {
 		var command map[string]any
 		if err := json.Unmarshal(manifest[operation], &command); err != nil {
 			t.Fatal(err)
@@ -90,7 +110,9 @@ func TestDSCIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("DSC_RESOURCE_PATH", dir)
-	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "user-config"))
+	t.Setenv("XDG_CONFIG_DIRS", filepath.Join(dir, "shared-config"))
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()
 	resourceType := "DscExtras.Linux/services"
 	for _, operation := range []string{"list", "schema"} {
@@ -105,12 +127,14 @@ func TestDSCIntegration(t *testing.T) {
 			t.Fatalf("DSC %s failed: %v\n%s", operation, err, output)
 		}
 	}
-	for _, state := range []string{"inactive", "failed", "activating", "deactivating"} {
+	for _, state := range []string{"active", "inactive", "failed", "activating", "deactivating"} {
 		t.Run(state, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")
 			actual := newFakeManager().actual
 			actual.ActiveState = state
-			if state != "inactive" {
+			if state == "active" {
+				actual.State = pointer(state)
+			} else if state != "inactive" {
 				actual.State = nil
 			}
 			data, err := json.Marshal(actual)
@@ -138,17 +162,113 @@ func TestDSCIntegration(t *testing.T) {
 				}
 				return result
 			}
+			for _, filter := range []struct {
+				input string
+				scope string
+				names []string
+			}{
+				{"", "system", []string{"example.service", "other.service"}},
+				{`{}`, "system", []string{"example.service", "other.service"}},
+				{`{"scope":"system"}`, "system", []string{"example.service", "other.service"}},
+				{`{"scope":"user"}`, "user", []string{"example.service", "other.service"}},
+				{`{"name":"example","scope":"user"}`, "user", []string{"example.service"}},
+				{`{"name":"missing","scope":"user"}`, "user", []string{}},
+			} {
+				args := []string{"resource", "export", "--resource", resourceType, "--output-format", "json"}
+				if filter.input != "" {
+					args = append(args, "--input", filter.input)
+				}
+				command := exec.CommandContext(ctx, dsc, args...)
+				var stderr strings.Builder
+				command.Stderr = &stderr
+				output, err := command.Output()
+				if err != nil {
+					t.Fatalf("DSC %s failed to consume Export: %v\n%s\n%s", strings.Join(args, " "), err, output, stderr.String())
+				}
+				var config struct {
+					Resources []struct {
+						Properties map[string]json.RawMessage
+					}
+				}
+				if err := json.Unmarshal(output, &config); err != nil || len(config.Resources) != len(filter.names) {
+					t.Fatalf("filtered Export = %s, %v", output, err)
+				}
+				for i, resource := range config.Resources {
+					properties := resource.Properties
+					var exported services.Unit
+					data, err := json.Marshal(properties)
+					if err != nil || json.Unmarshal(data, &exported) != nil ||
+						exported.Name != filter.names[i] || exported.Scope != filter.scope ||
+						exported.Enabled == nil || *exported.Enabled || exported.Masked == nil || *exported.Masked {
+						t.Fatalf("incorrect exported properties: %s (%v)", data, err)
+					}
+					wantKeys := 8
+					if state == "active" || state == "inactive" {
+						wantKeys++
+						if exported.State == nil || *exported.State != state {
+							t.Fatalf("lost representable state: %s", data)
+						}
+					} else if exported.State != nil {
+						t.Fatalf("guessed runtime state: %s", data)
+					}
+					if len(properties) != wantKeys {
+						t.Fatalf("Export lost observed properties: %s", data)
+					}
+					get := invoke("get", string(data))
+					var observed services.Unit
+					if err := json.Unmarshal(get["actualState"], &observed); err != nil ||
+						!reflect.DeepEqual(exported, observed) {
+						t.Fatalf("Export differs from Get: %s; Get = %s, %v", data, get["actualState"], err)
+					}
+				}
+			}
+			for _, operation := range []string{"get", "test", "set", "export"} {
+				input := `{"scope":"user"}`
+				if operation == "export" {
+					input = `{"scope":"global"}`
+				}
+				output, err := exec.CommandContext(ctx, dsc, "resource", operation, "--resource", resourceType,
+					"--input", input, "--output-format", "json").CombinedOutput()
+				if err == nil {
+					t.Fatalf("DSC %s accepted invalid input %s: %s", operation, input, output)
+				}
+				property := "name"
+				if operation == "export" {
+					property = "global"
+				}
+				if !bytes.Contains(output, []byte(property)) {
+					t.Fatalf("DSC %s failed for an unexpected reason: %s", operation, output)
+				}
+			}
+			output, err := exec.CommandContext(ctx, dsc, "resource", "get", "--all", "--resource", resourceType,
+				"--output-format", "json").Output()
+			if err != nil || !bytes.Contains(output, []byte("example.service")) {
+				t.Fatalf("DSC Get --all failed: %v\n%s", err, output)
+			}
+			lines := bytes.Split(bytes.TrimSpace(output), []byte("\n"))
+			if len(lines) != 2 {
+				t.Fatalf("DSC Get --all did not return two JSON Lines: %s", output)
+			}
+			for _, line := range lines {
+				if !json.Valid(line) {
+					t.Fatalf("DSC Get --all returned invalid JSON Line: %s", line)
+				}
+			}
 			desired := `{"name":"example","state":"active","enabled":true,"masked":true,"futureProperty":42}`
 			get := invoke("get", `{"name":"example"}`)
 			var observed services.Unit
 			if err := json.Unmarshal(get["actualState"], &observed); err != nil || observed.ActiveState != state ||
-				(state != "inactive" && observed.State != nil) {
+				(state != "active" && state != "inactive" && observed.State != nil) {
 				t.Fatalf("DSC Get lost raw runtime state: %+v %v", observed, err)
 			}
 			result := invoke("test", desired)
 			var diff []string
+			wantDiff := []string{"state", "enabled", "masked"}
+			if state == "active" {
+				wantDiff = wantDiff[1:]
+			}
 			if err := json.Unmarshal(result["differingProperties"], &diff); err != nil ||
-				!slices.Equal(diff, []string{"state", "enabled", "masked"}) || string(result["inDesiredState"]) != "false" {
+				!slices.Equal(diff, wantDiff) || string(result["inDesiredState"]) != "false" {
 				t.Fatalf("DSC stateAndDiff: %s %v", result, err)
 			}
 			unchanged, err := os.ReadFile(path)

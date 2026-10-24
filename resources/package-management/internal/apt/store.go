@@ -2,6 +2,8 @@ package apt
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -289,6 +291,73 @@ func (s Store) Get(selector Repository) (Repository, error) {
 	}
 	actual, _, err := s.observe(selector, documents, false)
 	return actual, err
+}
+
+func (s Store) Export(filter Repository) ([]Repository, error) {
+	filtered := filter.Name != "" || filter.URI != "" || filter.Suite != ""
+	if filtered {
+		if err := ValidateSelector(filter); err != nil {
+			return nil, err
+		}
+	}
+	documents, err := s.Discover()
+	if err != nil {
+		return nil, err
+	}
+	type repositoryIdentity struct{ uri, suite string }
+	identities := map[repositoryIdentity]bool{}
+	for _, document := range documents {
+		if document.parseErr != nil {
+			return nil, fmt.Errorf("cannot export malformed APT source %s: %w", document.Path, document.parseErr)
+		}
+		for _, entry := range document.Entries {
+			if entry.Type == "deb" {
+				identities[repositoryIdentity{repositoryURI(entry.URI), entry.Suite}] = true
+			}
+		}
+	}
+	ordered := make([]repositoryIdentity, 0, len(identities))
+	for identity := range identities {
+		ordered = append(ordered, identity)
+	}
+	slices.SortFunc(ordered, func(a, b repositoryIdentity) int {
+		if order := strings.Compare(a.uri, b.uri); order != 0 {
+			return order
+		}
+		return strings.Compare(a.suite, b.suite)
+	})
+	result := make([]Repository, 0, len(ordered))
+	for _, identity := range ordered {
+		sum := sha256.Sum256([]byte(identity.uri + "\x00" + identity.suite))
+		name := "repo-" + hex.EncodeToString(sum[:])
+		// Name is a management label, not part of the logical repository identity.
+		if filtered && (repositoryURI(filter.URI) != identity.uri || filter.Suite != identity.suite) {
+			continue
+		}
+		selector := Repository{Name: name, URI: identity.uri, Suite: identity.suite}
+		actual, _, err := s.observe(selector, documents, false)
+		if err != nil {
+			return nil, fmt.Errorf("export APT repository %s %s: %w", identity.uri, identity.suite, err)
+		}
+		if actual.Ensure == "Present" {
+			if err := ValidateName(actual.Name); err != nil {
+				return nil, err
+			}
+			if err := validateProperties(actual); err != nil {
+				return nil, fmt.Errorf("export APT repository %s %s: %w", identity.uri, identity.suite, err)
+			}
+			if actual.SigningKey == "" {
+				return nil, fmt.Errorf("export APT repository %s %s: no readable explicit signing key; this resource requires signingKey to reconcile Present state",
+					identity.uri, identity.suite)
+			}
+			if actual.SigningKey, err = ValidateSigningKey(actual.SigningKey); err != nil {
+				return nil, fmt.Errorf("export APT repository %s %s has unrepresentable signing material: %w",
+					identity.uri, identity.suite, err)
+			}
+			result = append(result, actual)
+		}
+	}
+	return result, nil
 }
 
 func (s Store) Test(desired Repository) (Repository, []string, error) {

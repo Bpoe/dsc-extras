@@ -2,6 +2,7 @@
 
 `dsclinux` provides the DSC v3 resources `DscExtras.Linux/services` for managing
 Linux systemd units and `DscExtras.Linux/groups` for managing local groups.
+Both resources support native DSC v3 Export.
 Services, timers, sockets, mounts, targets, and other systemd
 unit types are supported. Names without a recognized unit-type suffix resolve to
 `.service`.
@@ -187,6 +188,44 @@ printf '%s\n' '{"name":"docker"}' | dsclinux services get
 printf '%s\n' '{"name":"docker","state":"active"}' | dsclinux services test
 printf '%s\n' '{"name":"docker","enabled":false}' | dsclinux services set
 dsclinux --help
+```
+
+### Export
+
+Use DSC to enumerate observed instances and assemble them into a configuration
+document:
+
+```bash
+dsc resource export --resource DscExtras.Linux/groups
+dsc resource export --resource DscExtras.Linux/services
+dsc resource export --resource DscExtras.Linux/services --input '{"scope":"user"}'
+```
+
+Export emits JSON Lines from `dsclinux`; DSC owns the resulting configuration
+document. An optional resource-shaped filter can be supplied with DSC's
+`--input` or `--file` options. Groups match the exact `name`; services match
+the optional exact `name` and `scope` (`system` by default). A scope-only filter
+enumerates all units in that manager without requiring a name. Get, Test, and
+Set still require `name`. Both exports are sorted
+deterministically and are read-only.
+
+Groups are enumerated from `/etc/group`; NSS-only groups are not exported.
+Services enumerate unit files visible to the selected systemd manager, omit
+aliases and transient/generated units, and export only `active`/`inactive`
+states when systemd reports those exact states. Export returns the same observed
+instance as Get, including `activeState`, `subState`, `loadState`, and
+`unitFileState` diagnostics where applicable. Failed and transitional units
+retain their diagnostics, persistent enablement, and masking without a guessed
+runtime `state`. All operations share the resource instance schema; the separate
+Export filter schema only allows optional enumeration selectors.
+The default scope is `system`;
+select `scope: user` to enumerate the calling user's manager. A user manager
+must be available in the current login session.
+
+Exported instances can be reused directly in a DSC configuration, for example:
+
+```bash
+dsc resource export --resource DscExtras.Linux/groups > groups.dsc.yaml
 ```
 
 Get and Set emit one observed-state JSON object. Test emits the observed state

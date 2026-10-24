@@ -1,6 +1,7 @@
 package groups
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -54,6 +55,42 @@ func fixture(t *testing.T, entries string) (*Manager, *fakeNative) {
 	}
 	f.write(entries)
 	return m, f
+}
+
+func TestExportEnumeratesLocalGroupsDeterministicallyAndReadOnly(t *testing.T) {
+	manager, executor := fixture(t, "zeta:x:200:zoe\n+external:x:300:ldap\nalpha:x:100:alice,bob\n")
+	before, err := os.ReadFile(filepath.Join(manager.root, "etc", "group"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := manager.Export(context.Background(), Group{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].Name != "alpha" || items[1].Name != "zeta" ||
+		items[0].GID == nil || *items[0].GID != 100 || items[0].Members == nil ||
+		!slices.Equal(*items[0].Members, []string{"alice", "bob"}) {
+		t.Fatalf("unexpected export: %+v", items)
+	}
+	for _, item := range items {
+		observed, err := manager.Get(context.Background(), item)
+		if err != nil || !reflect.DeepEqual(item, observed) {
+			t.Fatalf("Export differs from Get: %+v; Get = %+v, %v", item, observed, err)
+		}
+	}
+	filtered, err := manager.Export(context.Background(), Group{Name: "zeta"})
+	if err != nil || len(filtered) != 1 || filtered[0].Name != "zeta" {
+		t.Fatalf("filtered export = %+v, %v", filtered, err)
+	}
+	after, err := os.ReadFile(filepath.Join(manager.root, "etc", "group"))
+	if err != nil || !bytes.Equal(before, after) || len(executor.mutations) != 0 {
+		t.Fatalf("Export modified state or invoked native commands: %v", err)
+	}
+	empty, _ := fixture(t, "")
+	none, err := empty.Export(context.Background(), Group{})
+	if err != nil || len(none) != 0 {
+		t.Fatalf("empty local group inventory = %+v, %v", none, err)
+	}
 }
 
 func (f *fakeNative) write(entries string) {

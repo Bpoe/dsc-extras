@@ -39,7 +39,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, store apt.Sto
 
 func runWithPackages(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, store apt.Store, packages packages.Manager) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		_, _ = fmt.Fprintln(stdout, "Usage: dscpm <resource> <get|set|test>\nResources: aptRepositories, packages")
+		_, _ = fmt.Fprintln(stdout, "Usage: dscpm <resource> <get|set|test|export>\nResources: aptRepositories, packages")
 		return 0
 	}
 	if len(args) == 1 && args[0] == "--version" {
@@ -66,10 +66,26 @@ func runWithPackages(ctx context.Context, args []string, stdin io.Reader, stdout
 
 func runAPTRepositories(args []string, stdin io.Reader, stdout, stderr io.Writer, store apt.Store) int {
 	if len(args) != 1 {
-		return reportError(stderr, "expected one operation: get, set, or test")
+		return reportError(stderr, "expected one operation: get, set, test, or export")
 	}
-	if args[0] != "get" && args[0] != "set" && args[0] != "test" {
+	if args[0] != "get" && args[0] != "set" && args[0] != "test" && args[0] != "export" {
 		return reportError(stderr, "unknown operation")
+	}
+	if args[0] == "export" {
+		filter, err := readOptionalAPTInput(stdin)
+		if err != nil {
+			return reportError(stderr, "invalid export filter: "+err.Error())
+		}
+		items, err := store.Export(filter)
+		if err != nil {
+			return reportError(stderr, err.Error())
+		}
+		for _, item := range items {
+			if code := writeJSON(stdout, item, stderr); code != 0 {
+				return code
+			}
+		}
+		return 0
 	}
 
 	instance, err := readInput(stdin)
@@ -106,6 +122,39 @@ func runAPTRepositories(args []string, stdin io.Reader, stdout, stderr io.Writer
 		}
 		return writeJSON(stdout, actual, stderr)
 	}
+}
+
+func readOptionalAPTInput(input io.Reader) (apt.Repository, error) {
+	data, err := io.ReadAll(io.LimitReader(input, maxInputBytes+1))
+	if err != nil {
+		return apt.Repository{}, err
+	}
+	if len(data) > maxInputBytes {
+		return apt.Repository{}, errors.New("input is too large")
+	}
+	var instance apt.Repository
+	if len(bytes.TrimSpace(data)) == 0 {
+		return instance, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&instance); err != nil {
+		return apt.Repository{}, err
+	}
+	var trailing any
+	if !errors.Is(decoder.Decode(&trailing), io.EOF) {
+		return apt.Repository{}, errors.New("expected a single JSON object")
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil || object == nil {
+		return apt.Repository{}, errors.New("filter must be a JSON object")
+	}
+	if len(object) != 0 {
+		if _, ok := object["name"]; !ok {
+			return apt.Repository{}, errors.New("filter must include its resource identity")
+		}
+	}
+	return instance, nil
 }
 
 func readInput(input io.Reader) (apt.Repository, error) {

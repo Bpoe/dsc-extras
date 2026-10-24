@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -43,6 +44,142 @@ func fixtureFile(t *testing.T, store Store, reference, content string) string {
 	}
 	writeFile(t, path, content)
 	return path
+}
+
+func TestExportDiscoversLogicalRepositoriesReadOnlyAndWithFilter(t *testing.T) {
+	store := newTestStore(t)
+	key, err := os.ReadFile(filepath.Join("testdata", "docker.asc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writePublicKeyring(t, store, "trusted", string(key))
+	fixtureFile(t, store, "/etc/apt/sources.list",
+		"deb [arch=amd64 signed-by=/etc/apt/keyrings/trusted.gpg] https://packages.example.org/debian stable main\n")
+	fixtureFile(t, store, "/etc/apt/sources.list.d/multi.sources",
+		"Types: deb deb-src\nURIs: https://one.example/repo https://two.example/repo\n"+
+			"Suites: stable testing\nComponents: main contrib\nArchitectures: arm64 amd64\n"+
+			"Signed-By: /etc/apt/keyrings/trusted.gpg\nEnabled: no\n")
+	before := snapshot(t, store.Root)
+	items, err := store.Export(Repository{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 5 {
+		t.Fatalf("Export returned %d logical repositories, want 5: %+v", len(items), items)
+	}
+	for i, item := range items {
+		observed, err := store.Get(item)
+		if err != nil || !reflect.DeepEqual(item, observed) {
+			t.Fatalf("Export differs from Get: %+v; Get = %+v, %v", item, observed, err)
+		}
+		if item.Ensure != "Present" || item.Name == "" || item.URI == "" || item.Suite == "" {
+			t.Fatalf("invalid exported repository: %+v", item)
+		}
+		if i > 0 && (items[i-1].URI > item.URI ||
+			items[i-1].URI == item.URI && items[i-1].Suite > item.Suite) {
+			t.Fatalf("repositories are not sorted: %+v", items)
+		}
+	}
+	if items[0].URI != "https://one.example/repo" || items[0].Enabled == nil || *items[0].Enabled ||
+		!slices.Equal(items[0].Architectures, []string{"arm64", "amd64"}) {
+		t.Fatalf("Deb822 values were not represented: %+v", items[0])
+	}
+	filtered, err := store.Export(Repository{Name: items[0].Name, URI: items[0].URI, Suite: items[0].Suite})
+	if err != nil || len(filtered) != 1 || filtered[0].URI != items[0].URI {
+		t.Fatalf("filtered Export = %+v, %v", filtered, err)
+	}
+	assertUnchanged(t, before, snapshot(t, store.Root))
+}
+
+func TestExportReturnsNoRowsForEmptySources(t *testing.T) {
+	items, err := newTestStore(t).Export(Repository{})
+	if err != nil || len(items) != 0 {
+		t.Fatalf("empty source inventory = %+v, %v", items, err)
+	}
+}
+
+func TestExportFiltersByLogicalIdentityNotManagementLabel(t *testing.T) {
+	for _, source := range []string{"sources.list", "sources.list.d/docker.list", "sources.list.d/docker.sources", "sources.list.d/vendor.sources"} {
+		t.Run(source, func(t *testing.T) {
+			store := newTestStore(t)
+			key, err := os.ReadFile(filepath.Join("testdata", "docker.asc"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			writePublicKeyring(t, store, "trusted", string(key))
+			content := "deb [signed-by=/etc/apt/keyrings/trusted.gpg] https://download.docker.com/linux/debian stable main\n"
+			if strings.HasSuffix(source, ".sources") {
+				content = "Types: deb\nURIs: https://download.docker.com/linux/debian\nSuites: stable\nComponents: main\nSigned-By: /etc/apt/keyrings/trusted.gpg\n"
+			}
+			fixtureFile(t, store, "/etc/apt/"+source, content)
+			// A label collision must not select a different repository by filename.
+			fixtureFile(t, store, "/etc/apt/sources.list.d/requested.sources",
+				"Types: deb\nURIs: https://unrelated.example\nSuites: stable\nComponents: main\nSigned-By: /etc/apt/keyrings/trusted.gpg\n")
+			before := snapshot(t, store.Root)
+			all, err := store.Export(Repository{})
+			if err != nil || len(all) != 2 {
+				t.Fatalf("unfiltered Export = %+v, %v", all, err)
+			}
+			for _, name := range []string{"docker", "requested", "arbitrary-label", all[0].Name} {
+				items, err := store.Export(Repository{Name: name, URI: "https://download.docker.com/linux/debian/", Suite: "stable"})
+				if err != nil || len(items) != 1 || !reflect.DeepEqual(items[0], all[0]) {
+					t.Fatalf("Export with label %q = %+v, %v; want %+v", name, items, err, all[0])
+				}
+				desired := items[0]
+				if err := ValidateDesired(&desired); err != nil {
+					t.Fatalf("Export is not reusable desired state: %v", err)
+				}
+				_, diff, err := store.Test(desired)
+				if err != nil || len(diff) != 0 {
+					t.Fatalf("exported configuration does not match source: %v, %v", diff, err)
+				}
+			}
+			for _, filter := range []Repository{
+				{Name: "docker", URI: "https://missing.example", Suite: "stable"},
+				{Name: "docker", URI: "https://download.docker.com/linux/debian", Suite: "missing"},
+			} {
+				items, err := store.Export(filter)
+				if err != nil || len(items) != 0 {
+					t.Fatalf("nonmatching Export = %+v, %v", items, err)
+				}
+			}
+			assertUnchanged(t, before, snapshot(t, store.Root))
+		})
+	}
+}
+
+func TestExportIncludesReadableSigningKey(t *testing.T) {
+	store := newTestStore(t)
+	key, err := os.ReadFile(filepath.Join("testdata", "docker.asc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writePublicKeyring(t, store, "trusted", string(key))
+	fixtureFile(t, store, "/etc/apt/sources.list",
+		"deb [signed-by=/etc/apt/keyrings/trusted.gpg] https://signed.example/repo stable main\n")
+	items, err := store.Export(Repository{})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("Export = %+v, %v", items, err)
+	}
+	if _, err := ValidateSigningKey(items[0].SigningKey); err != nil {
+		t.Fatalf("exported signing key is invalid: %v", err)
+	}
+}
+
+func TestExportRejectsUnrepresentableRepositoryIdentity(t *testing.T) {
+	store := newTestStore(t)
+	fixtureFile(t, store, "/etc/apt/sources.list", "deb not-a-uri stable main\n")
+	if _, err := store.Export(Repository{}); err == nil {
+		t.Fatal("Export accepted an invalid URI")
+	}
+}
+
+func TestExportRejectsRepositoriesWithoutRepresentableSigningKey(t *testing.T) {
+	store := newTestStore(t)
+	fixtureFile(t, store, "/etc/apt/sources.list", "deb https://global.example stable main\n")
+	if _, err := store.Export(Repository{}); err == nil || !strings.Contains(err.Error(), "explicit signing key") {
+		t.Fatalf("global-trust repository error = %v", err)
+	}
 }
 
 func writePublicKeyring(t *testing.T, store Store, name, armored string) {

@@ -25,6 +25,10 @@ type serviceManager interface {
 	Set(context.Context, services.Unit) (services.Unit, error)
 }
 
+type serviceExporter interface {
+	Export(context.Context, services.Unit) ([]services.Unit, error)
+}
+
 type testResult struct {
 	services.Unit
 	InDesiredState bool `json:"_inDesiredState"`
@@ -34,6 +38,10 @@ type groupManager interface {
 	Get(context.Context, groups.Group) (groups.Group, error)
 	Test(context.Context, groups.Group) (groups.Group, []string, error)
 	Set(context.Context, groups.Group) (groups.Group, error)
+}
+
+type groupExporter interface {
+	Export(context.Context, groups.Group) ([]groups.Group, error)
 }
 
 type groupTestResult struct {
@@ -50,7 +58,7 @@ func main() {
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, manager serviceManager, groupManager groupManager) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		_, _ = fmt.Fprintln(stdout, "Usage: dsclinux <resource> <get|test|set>\nResources: services, groups")
+		_, _ = fmt.Fprintln(stdout, "Usage: dsclinux <resource> <get|test|set|export>\nResources: services, groups")
 		return 0
 	}
 	if len(args) == 1 && args[0] == "--version" {
@@ -58,13 +66,43 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return 0
 	}
 	if len(args) != 2 || (args[0] != "services" && args[0] != "groups") {
-		return reportError(stderr, "expected services or groups and one operation: get, test, or set")
+		return reportError(stderr, "expected services or groups and one operation: get, test, set, or export")
 	}
-	if args[1] != "get" && args[1] != "test" && args[1] != "set" {
+	if args[1] != "get" && args[1] != "test" && args[1] != "set" && args[1] != "export" {
 		return reportError(stderr, "unknown operation")
 	}
 	if args[0] == "groups" {
+		if args[1] == "export" {
+			var filter groups.Group
+			if err := readOptionalProperties(stdin, &filter); err != nil {
+				return reportError(stderr, "invalid export filter: "+err.Error())
+			}
+			exporter, ok := groupManager.(groupExporter)
+			if !ok {
+				return reportError(stderr, "group manager does not support export")
+			}
+			items, err := exporter.Export(ctx, filter)
+			if err != nil {
+				return reportError(stderr, err.Error())
+			}
+			return writeJSONLines(stdout, items, stderr)
+		}
 		return runGroups(ctx, args[1], stdin, stdout, stderr, groupManager)
+	}
+	if args[1] == "export" {
+		var filter services.Unit
+		if err := readOptionalProperties(stdin, &filter); err != nil {
+			return reportError(stderr, "invalid export filter: "+err.Error())
+		}
+		exporter, ok := manager.(serviceExporter)
+		if !ok {
+			return reportError(stderr, "service manager does not support export")
+		}
+		items, err := exporter.Export(ctx, filter)
+		if err != nil {
+			return reportError(stderr, err.Error())
+		}
+		return writeJSONLines(stdout, items, stderr)
 	}
 	desired, err := readInput(stdin)
 	if err != nil {
@@ -90,6 +128,27 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return writeJSON(stdout, differences, stderr)
 	}
 	return writeJSON(stdout, actual, stderr)
+}
+
+func readOptionalProperties(input io.Reader, target any) error {
+	data, err := io.ReadAll(io.LimitReader(input, maxInputBytes+1))
+	if err != nil {
+		return err
+	}
+	if len(data) > maxInputBytes {
+		return errors.New("input is too large")
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(data, target); err != nil {
+		return err
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil || object == nil {
+		return errors.New("filter must be a JSON object")
+	}
+	return nil
 }
 
 func readInput(input io.Reader) (services.Unit, error) {
@@ -140,6 +199,28 @@ func runGroups(ctx context.Context, operation string, stdin io.Reader, stdout, s
 func writeJSON(stdout io.Writer, value any, stderr io.Writer) int {
 	if err := json.NewEncoder(stdout).Encode(value); err != nil {
 		return reportError(stderr, "failed to write JSON output")
+	}
+	return 0
+}
+
+func writeJSONLines(stdout io.Writer, values any, stderr io.Writer) int {
+	items, ok := values.([]services.Unit)
+	if ok {
+		for _, item := range items {
+			if code := writeJSON(stdout, item, stderr); code != 0 {
+				return code
+			}
+		}
+		return 0
+	}
+	groupItems, ok := values.([]groups.Group)
+	if !ok {
+		return reportError(stderr, "unsupported export result")
+	}
+	for _, item := range groupItems {
+		if code := writeJSON(stdout, item, stderr); code != 0 {
+			return code
+		}
 	}
 	return 0
 }

@@ -87,6 +87,217 @@ func packageVersion(version string) packageStep {
 	return packageStep{program: "dpkg", args: []string{"--validate-version", version}}
 }
 
+func packageInventory(output string) packageStep {
+	return packageStep{program: "dpkg-query", args: []string{"--show", packageQueryFormat}, stdout: output}
+}
+
+func TestParseDpkgPackageRecordStatusVocabulary(t *testing.T) {
+	for _, action := range []string{"unknown", "install", "hold", "deinstall", "purge"} {
+		for _, flag := range []string{"ok", "reinstreq"} {
+			for _, state := range []string{"not-installed", "config-files", "half-installed", "unpacked", "half-configured", "triggers-awaited", "triggers-pending", "installed"} {
+				status := action + " " + flag + " " + state
+				t.Run(status, func(t *testing.T) {
+					actual, err := parseDpkgPackageRecord("libfoo:arm64\t" + status + "\t2:1.0-3\tarm64")
+					want := PackageState{
+						Name: "libfoo", Status: status, Version: "2:1.0-3", Architecture: "arm64",
+						Installed: flag == "ok" && state == "installed",
+					}
+					if err != nil || !reflect.DeepEqual(actual, want) {
+						t.Fatalf("parsed record = %+v, %v; want %+v", actual, err, want)
+					}
+				})
+			}
+		}
+	}
+	actual, err := parseDpkgPackageRecord("libfoo\tunknown ok not-installed\t\t")
+	if err != nil || actual.Name != "libfoo" || actual.Installed || actual.Status != "unknown ok not-installed" ||
+		actual.Version != "" || actual.Architecture != "" {
+		t.Fatalf("not-installed record = %+v, %v", actual, err)
+	}
+}
+
+func TestGetAndExportShareDpkgInstallationPredicate(t *testing.T) {
+	for _, test := range []struct {
+		status    string
+		installed bool
+	}{
+		{"install ok installed", true},
+		{"hold ok installed", true},
+		{"deinstall ok installed", true},
+		{"purge ok installed", true},
+		{"unknown ok installed", true},
+		{"deinstall  ok   installed", true},
+		{"deinstall ok config-files", false},
+		{"install ok unpacked", false},
+		{"install ok half-configured", false},
+		{"install reinstreq installed", false},
+		{"unknown ok not-installed", false},
+	} {
+		t.Run(test.status, func(t *testing.T) {
+			row := "libfoo:arm64\t" + test.status + "\t2:1.0-3\tarm64\n"
+			desired := Packages{Name: PackageNames{Values: []string{"libfoo:arm64"}, Scalar: true}, Version: "2:1.0-3"}
+			steps := append(architectureSteps(), packageVersion(desired.Version), packageQuery("libfoo", row))
+			if test.installed {
+				steps = append(steps, packageComparison(desired.Version, "eq", desired.Version, true))
+			}
+			observed, err := packageManagerFixture(t, steps...).Get(context.Background(), desired)
+			if err != nil || len(observed.Packages) != 1 || observed.Packages[0].Installed != test.installed ||
+				observed.Packages[0].Status != test.status {
+				t.Fatalf("Get = %+v, %v", observed, err)
+			}
+			manager := packageManagerFixture(t,
+				packageStep{program: "dpkg", args: []string{"--print-architecture"}, stdout: "amd64\n"},
+				packageInventory(row))
+			items, err := manager.Export(context.Background(), Packages{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !test.installed {
+				if len(items) != 0 {
+					t.Fatalf("Export returned a package Get considers not installed: %+v", items)
+				}
+			} else if len(items) != 1 || !reflect.DeepEqual(items[0], observed) {
+				t.Fatalf("Export differs from Get: %+v; Get = %+v", items, observed)
+			}
+		})
+	}
+}
+
+func TestGetAndExportRejectInvalidDpkgRecordsConsistently(t *testing.T) {
+	for _, row := range []string{
+		"libfoo\tinstall ok installed\t1",
+		"libfoo\tinstall ok installed\t1\tarm64\textra",
+		"bad/name\tinstall ok installed\t1\tarm64",
+		"libfoo:amd64\tinstall ok installed\t1\tarm64",
+		"libfoo:arm64:arm64\tinstall ok installed\t1\tarm64",
+		"libfoo:\tunknown ok not-installed\t\t",
+		"libfoo\tinvalid ok installed\t1\tarm64",
+		"libfoo\tdeinstall invalid installed\t1\tarm64",
+		"libfoo\tpurge ok invalid\t1\tarm64",
+		"libfoo\tinstall ok\t1\tarm64",
+		"libfoo\tdeinstall ok config-files extra\t1\tarm64",
+		"libfoo\tinstall ok installed\t1\tbad/arch",
+		"libfoo\tinstall ok unpacked\t1\t",
+		"libfoo\tinstall ok installed\t\tarm64",
+	} {
+		t.Run(row, func(t *testing.T) {
+			_, parseErr := parseDpkgPackageRecord(row)
+			steps := append(architectureSteps(), packageQuery("libfoo", row+"\n"))
+			_, getErr := packageManagerFixture(t, steps...).Get(context.Background(), packageDesired("libfoo:arm64"))
+			exporter := packageManagerFixture(t,
+				packageStep{program: "dpkg", args: []string{"--print-architecture"}, stdout: "amd64\n"},
+				packageInventory(row+"\n"))
+			_, exportErr := exporter.Export(context.Background(), Packages{})
+			if parseErr == nil || getErr == nil || exportErr == nil ||
+				parseErr.Error() != getErr.Error() || getErr.Error() != exportErr.Error() {
+				t.Fatalf("inconsistent errors: parser = %v; Get = %v; Export = %v", parseErr, getErr, exportErr)
+			}
+		})
+	}
+}
+
+func TestExportRemovalSelectionsUseOneBulkQueryAndPreserveMultiarchitecture(t *testing.T) {
+	inventory := "libfoo:arm64\tpurge ok installed\t2:1.0-3\tarm64\n" +
+		"libfoo:amd64\tdeinstall ok installed\t1.0\tamd64\n" +
+		"adduser\thold ok installed\t3.137\tall\n" +
+		"stale\tdeinstall ok config-files\t1.0\tamd64\n"
+	for _, filter := range []Packages{{}, {Name: PackageNames{Values: []string{"libfoo"}}}} {
+		manager := packageManagerFixture(t,
+			packageStep{program: "dpkg", args: []string{"--print-architecture"}, stdout: "amd64\n"},
+			packageInventory(inventory))
+		items, err := manager.Export(context.Background(), filter)
+		wantNames := []string{"adduser", "libfoo:amd64", "libfoo:arm64"}
+		wantVersions := []string{"3.137", "1.0", "2:1.0-3"}
+		if len(filter.Name.Values) > 0 {
+			wantNames, wantVersions = wantNames[1:], wantVersions[1:]
+		}
+		if err != nil || len(items) != len(wantNames) {
+			t.Fatalf("Export = %+v, %v", items, err)
+		}
+		for i, item := range items {
+			if item.Name.Values[0] != wantNames[i] || item.Version != wantVersions[i] ||
+				len(item.Packages) != 1 || item.Packages[0].RequestedName != wantNames[i] || !item.Packages[0].Installed {
+				t.Fatalf("lost package identity or observation: %+v", item)
+			}
+		}
+	}
+}
+
+func TestExportUsesInstalledDpkgInventoryAndArchitectureIdentity(t *testing.T) {
+	inventoryArgs := []string{"--show", "--showformat=${binary:Package}\t${Status}\t${Version}\t${Architecture}\n"}
+	inventory := "libfoo:arm64\tinstall ok installed\t2:1.0-3\tarm64\n" +
+		"adduser\tinstall ok installed\t3.137\tall\n" +
+		"libfoo:amd64\thold ok installed\t2:1.0-3\tamd64\n" +
+		"stale\tdeinstall ok config-files\t1.0\tamd64\n"
+	manager := packageManagerFixture(t,
+		packageStep{program: "dpkg", args: []string{"--print-architecture"}, stdout: "amd64\n"},
+		packageStep{program: "dpkg-query", args: inventoryArgs, stdout: inventory},
+	)
+	items, err := manager.Export(context.Background(), Packages{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("Export returned %+v", items)
+	}
+	gotNames := []string{items[0].Name.Values[0], items[1].Name.Values[0], items[2].Name.Values[0]}
+	if !slices.Equal(gotNames, []string{"adduser", "libfoo:amd64", "libfoo:arm64"}) ||
+		items[0].Version != "3.137" || items[1].Version != "2:1.0-3" {
+		t.Fatalf("unexpected package export: %+v", items)
+	}
+	for _, item := range items {
+		if item.Ensure != "Present" || item.State != "Present" || len(item.Packages) != 1 {
+			t.Fatalf("missing observed package properties: %+v", item)
+		}
+		state := item.Packages[0]
+		if !state.Installed || state.RequestedName != item.Name.Values[0] ||
+			state.Version != item.Version || state.Architecture == "" || state.Status == "" {
+			t.Fatalf("incorrect package observation: %+v", item)
+		}
+		var rows strings.Builder
+		for _, line := range strings.Split(strings.TrimSpace(inventory), "\n") {
+			name := strings.SplitN(line, "\t", 2)[0]
+			if name == state.Name || strings.HasPrefix(name, state.Name+":") {
+				rows.WriteString(line + "\n")
+			}
+		}
+		getSteps := append(architectureSteps(), packageVersion(item.Version),
+			packageQuery(state.Name, rows.String()), packageComparison(item.Version, "eq", item.Version, true))
+		getManager := packageManagerFixture(t, getSteps...)
+		observed, err := getManager.Get(context.Background(), item)
+		if err != nil || !reflect.DeepEqual(item, observed) {
+			t.Fatalf("Export differs from Get: %+v; Get = %+v, %v", item, observed, err)
+		}
+	}
+	filtered := packageManagerFixture(t,
+		packageStep{program: "dpkg", args: []string{"--print-architecture"}, stdout: "amd64\n"},
+		packageStep{program: "dpkg-query", args: inventoryArgs, stdout: inventory},
+	)
+	filteredItems, err := filtered.Export(context.Background(), Packages{
+		Name:   PackageNames{Values: []string{"libfoo:arm64"}, Scalar: true},
+		Ensure: "Absent", Version: "not-observed", State: "Absent",
+	})
+	if err != nil || len(filteredItems) != 1 || filteredItems[0].Name.Values[0] != "libfoo:arm64" {
+		t.Fatalf("filtered Export = %+v, %v", filteredItems, err)
+	}
+	if !reflect.DeepEqual(filteredItems[0], items[2]) {
+		t.Fatalf("Export copied requested values instead of observed state: %+v", filteredItems)
+	}
+}
+
+func TestExportReturnsNoRowsForEmptyDpkgInventory(t *testing.T) {
+	manager := packageManagerFixture(t,
+		packageStep{program: "dpkg", args: []string{"--print-architecture"}, stdout: "amd64\n"},
+		packageStep{program: "dpkg-query", args: []string{
+			"--show", "--showformat=${binary:Package}\t${Status}\t${Version}\t${Architecture}\n",
+		}},
+	)
+	items, err := manager.Export(context.Background(), Packages{})
+	if err != nil || len(items) != 0 {
+		t.Fatalf("empty dpkg inventory = %+v, %v", items, err)
+	}
+}
+
 func packageComparison(left, operator, right string, equal bool) packageStep {
 	step := packageStep{program: "dpkg", args: []string{"--compare-versions", left, operator, right}}
 	if !equal {

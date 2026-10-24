@@ -189,6 +189,61 @@ func (m *Manager) Get(ctx context.Context, desired Unit) (Unit, error) {
 	return actual.Unit, err
 }
 
+func (m *Manager) Export(ctx context.Context, filter Unit) ([]Unit, error) {
+	scope := filter.Scope
+	if scope == "" {
+		scope = "system"
+	}
+	if scope != "system" && scope != "user" {
+		return nil, errors.New("scope must be system or user")
+	}
+	filterName := ""
+	if filter.Name != "" {
+		_, normalizedName, err := normalize(Unit{Name: filter.Name, Scope: scope})
+		if err != nil {
+			return nil, err
+		}
+		filterName = normalizedName
+	}
+	output, err := m.run(ctx, scope, "list-unit-files", "--all", "--full", "--no-legend")
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]bool{}
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[1] == "alias" || fields[1] == "transient" || fields[1] == "generated" {
+			continue
+		}
+		name := fields[0]
+		if !unitName.MatchString(name) || strings.Count(name, "@") > 1 ||
+			!slices.Contains(unitTypes, "."+suffix(name)) || len(name) > 255 {
+			continue
+		}
+		if filterName != "" && filterName != name {
+			continue
+		}
+		names[name] = true
+	}
+	ordered := make([]string, 0, len(names))
+	for name := range names {
+		ordered = append(ordered, name)
+	}
+	slices.Sort(ordered)
+	result := make([]Unit, 0, len(ordered))
+	for _, name := range ordered {
+		actual, err := m.Get(ctx, Unit{Name: name, Scope: scope})
+		if err != nil {
+			return nil, fmt.Errorf("observe unit %s: %w", name, err)
+		}
+		if actual.LoadState == "not-found" || actual.UnitFileState == "alias" {
+			continue
+		}
+		result = append(result, actual)
+	}
+	return result, nil
+}
+
 func differences(desired, actual Unit) []string {
 	result := []string{}
 	if desired.State != nil && *desired.State != actual.ActiveState {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -68,7 +69,7 @@ func TestDSCGroupsIntegration(t *testing.T) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	for _, operation := range []string{"get", "test", "set"} {
+	for _, operation := range []string{"get", "test", "set", "export"} {
 		var command map[string]any
 		if err := json.Unmarshal(manifest[operation], &command); err != nil {
 			t.Fatal(err)
@@ -176,6 +177,35 @@ func TestDSCGroupsIntegration(t *testing.T) {
 		t.Fatalf("schema rejection invoked Set: %v", err)
 	}
 	assertState(invoke("set", `{"name":"dev","gid":3000,"members":["old","bob"]}`), "afterState", "Present", []string{"bob", "old"})
+	for _, args := range [][]string{
+		{"resource", "export", "--resource", resourceType, "--output-format", "json"},
+		{"resource", "get", "--all", "--resource", resourceType, "--output-format", "json"},
+	} {
+		output, err := exec.CommandContext(ctx, dsc, args...).Output()
+		if err != nil || !json.Valid(output) || !bytes.Contains(output, []byte("dev")) {
+			t.Fatalf("DSC %s failed to consume Export: %v\n%s", strings.Join(args, " "), err, output)
+		}
+		if args[1] == "export" {
+			var config struct {
+				Resources []struct {
+					Properties groups.Group
+				}
+			}
+			if err := json.Unmarshal(output, &config); err != nil || len(config.Resources) != 1 {
+				t.Fatalf("DSC group Export: %s, %v", output, err)
+			}
+			exported := config.Resources[0].Properties
+			input, err := json.Marshal(exported)
+			if err != nil {
+				t.Fatal(err)
+			}
+			get := invoke("get", string(input))
+			var observed groups.Group
+			if err := json.Unmarshal(get["actualState"], &observed); err != nil || !reflect.DeepEqual(exported, observed) {
+				t.Fatalf("Export differs from Get: %s; Get = %s, %v", input, get["actualState"], err)
+			}
+		}
+	}
 	assertDiff(`{"name":"dev","includedMembers":["alice"],"excludedMembers":["old"]}`, []string{"includedMembers", "excludedMembers"})
 	assertState(invoke("set", `{"name":"dev","includedMembers":["alice"],"excludedMembers":["old"],"future":42}`),
 		"afterState", "Present", []string{"alice", "bob"})

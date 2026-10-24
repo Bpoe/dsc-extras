@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/apt"
+	"github.com/Bpoe/dsc-extras/resources/package-management/internal/packages"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
 )
 
@@ -89,6 +91,11 @@ func TestManifestsShareImplementation(t *testing.T) {
 				t.Fatalf("%s %s does not invoke the shared handler: %v", name, operation, command)
 			}
 		}
+		export := manifest["export"].(map[string]any)
+		if export["executable"] != "dscpm" || export["input"] != "stdin" ||
+			!reflect.DeepEqual(export["args"], []any{"aptRepositories", "export"}) {
+			t.Fatalf("%s export does not invoke the shared handler: %v", name, export)
+		}
 		if manifest["test"].(map[string]any)["return"] != "stateAndDiff" ||
 			manifest["set"].(map[string]any)["return"] != "state" ||
 			manifest["set"].(map[string]any)["implementsPretest"] != true {
@@ -104,6 +111,121 @@ func TestManifestsShareImplementation(t *testing.T) {
 	delete(manifests[1], "type")
 	if !reflect.DeepEqual(manifests[0], manifests[1]) {
 		t.Fatal("new and compatibility manifests differ beyond resource type")
+	}
+}
+
+func TestAPTRepositoryExportCLI(t *testing.T) {
+	store := makeStore(t)
+	source := filepath.Join(store.Root, "etc", "apt", "sources.list.d", "manual.list")
+	if err := os.MkdirAll(filepath.Dir(source), 0755); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(store.Root, "etc", "apt", "keyrings", "manual.asc")
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte(testPublicKey), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("deb [arch=amd64 signed-by=/etc/apt/keyrings/manual.asc] https://repo.example/debian stable main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := call(t, store, "export", "")
+	var item apt.Repository
+	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
+	if code != 0 || stderr != "" || len(lines) != 1 || json.Unmarshal([]byte(lines[0]), &item) != nil ||
+		item.Ensure != "Present" || item.URI != "https://repo.example/debian" || item.Suite != "stable" {
+		t.Fatalf("invalid repository JSON Lines: %d %q %q", code, stdout, stderr)
+	}
+	filter := `{"name":"` + item.Name + `","uri":"` + item.URI + `","suite":"stable"}`
+	code, filtered, stderr := call(t, store, "export", filter)
+	if code != 0 || stderr != "" || strings.Count(filtered, "\n") != 1 {
+		t.Fatalf("filtered repository export: %d %q %q", code, filtered, stderr)
+	}
+	after, err := os.ReadFile(source)
+	if err != nil || string(before) != string(after) {
+		t.Fatalf("Export modified source: %v", err)
+	}
+}
+
+type exportPackagesFixture struct{ items []packages.Packages }
+
+func (f exportPackagesFixture) Get(context.Context, packages.Packages) (packages.Packages, error) {
+	return packages.Packages{}, nil
+}
+func (f exportPackagesFixture) Test(context.Context, packages.Packages) (packages.Packages, []string, error) {
+	return packages.Packages{}, nil, nil
+}
+func (f exportPackagesFixture) Set(context.Context, packages.Packages) (packages.Packages, error) {
+	return packages.Packages{}, nil
+}
+func (f exportPackagesFixture) Export(_ context.Context, filter packages.Packages) ([]packages.Packages, error) {
+	if len(filter.Name.Values) == 0 {
+		return f.items, nil
+	}
+	var result []packages.Packages
+	for _, item := range f.items {
+		for _, name := range filter.Name.Values {
+			if item.Name.Values[0] == name {
+				result = append(result, item)
+			}
+		}
+	}
+	return result, nil
+}
+
+func TestPackagesExportCLIUsesJSONLinesAndFilter(t *testing.T) {
+	manager := exportPackagesFixture{items: []packages.Packages{
+		{Name: packages.PackageNames{Values: []string{"alpha"}, Scalar: true}, Version: "1.0"},
+		{Name: packages.PackageNames{Values: []string{"beta:arm64"}, Scalar: true}, Version: "2.0"},
+	}}
+	for _, test := range []struct {
+		input string
+		lines int
+	}{
+		{"", 2},
+		{`{"name":"beta:arm64"}`, 1},
+		{`{"name":"missing"}`, 0},
+	} {
+		var stdout, stderr strings.Builder
+		code := runWithPackages(context.Background(), []string{"packages", "export"},
+			strings.NewReader(test.input), &stdout, &stderr, apt.NewStore(t.TempDir()), manager)
+		output := strings.TrimSuffix(stdout.String(), "\n")
+		if test.lines == 0 {
+			if code != 0 || output != "" || stderr.Len() != 0 {
+				t.Fatalf("empty export = %d %q %q", code, output, stderr.String())
+			}
+			continue
+		}
+		lines := strings.Split(output, "\n")
+		if code != 0 || stderr.Len() != 0 || len(lines) != test.lines {
+			t.Fatalf("export = %d %q %q", code, output, stderr.String())
+		}
+		for _, line := range lines {
+			if !json.Valid([]byte(line)) {
+				t.Fatalf("invalid JSONL line %q", line)
+			}
+		}
+	}
+}
+
+func TestPackagesManifestDeclaresExport(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "manifests", "packages.dsc.resource.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	export := manifest["export"].(map[string]any)
+	if export["executable"] != "dscpm" || export["input"] != "stdin" ||
+		!reflect.DeepEqual(export["args"], []any{"packages", "export"}) {
+		t.Fatalf("invalid package Export declaration: %s", data)
 	}
 }
 

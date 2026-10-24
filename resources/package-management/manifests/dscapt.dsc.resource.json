@@ -4,6 +4,11 @@
   "version": "0.1.0",
   "description": "Manage logical APT repository state while preserving existing source and keyring formats",
   "kind": "resource",
+  "export": {
+    "executable": "dscpm",
+    "args": ["aptRepositories", "export"],
+    "input": "stdin"
+  },
   "get": {
     "executable": "dscpm",
     "args": ["aptRepositories", "get"],

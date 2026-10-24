@@ -4,6 +4,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -31,6 +32,45 @@ type fakeSystemctl struct {
 	defaultInstance           string
 }
 
+type exportSystemctl struct {
+	entries []string
+	calls   []string
+}
+
+func (f *exportSystemctl) Execute(_ context.Context, args []string) ([]byte, []byte, error) {
+	if len(args) < 4 {
+		return nil, nil, errors.New("invalid systemctl arguments")
+	}
+	operation := args[3]
+	f.calls = append(f.calls, operation)
+	if operation == "list-unit-files" {
+		if len(args) > 7 {
+			name := args[len(args)-1]
+			return []byte(name + " static -\n"), nil, nil
+		}
+		return []byte(strings.Join(f.entries, "\n") + "\n"), nil, nil
+	}
+	if operation != "show" {
+		return nil, nil, fmt.Errorf("unexpected operation %s", operation)
+	}
+	name := args[len(args)-1]
+	state := "inactive"
+	switch name {
+	case "active.service":
+		state = "active"
+	case "failed.service", "activating.service", "deactivating.service":
+		state = strings.TrimSuffix(name, ".service")
+	}
+	fileState := "disabled"
+	if name == "enabled.service" {
+		fileState = "enabled"
+	} else if name == "masked.service" || name == "enabled-masked.service" {
+		fileState = "masked"
+	}
+	return []byte(fmt.Sprintf("Id=%s\nNames=%s\nActiveState=%s\nSubState=dead\nLoadState=loaded\nUnitFileState=%s\nNeedDaemonReload=no\nFragmentPath=/usr/lib/systemd/system/%s\n",
+		name, name, state, fileState, name)), nil, nil
+}
+
 func fixture(t *testing.T) (*Manager, *fakeSystemctl) {
 	t.Helper()
 	executor := &fakeSystemctl{
@@ -39,6 +79,124 @@ func fixture(t *testing.T) (*Manager, *fakeSystemctl) {
 	manager := NewManager(executor, t.TempDir())
 	executor.manager = manager
 	return manager, executor
+}
+
+func TestExportEnumeratesRepresentableUnitsDeterministically(t *testing.T) {
+	executor := &exportSystemctl{entries: []string{
+		"zeta.service disabled -", "alias.service alias -", "enabled.service enabled -",
+		"masked.service masked -", "enabled-masked.service masked -",
+		"active.service enabled -", "activating.service disabled -", "deactivating.service disabled -",
+		"worker@.service static -", "failed.service static -", "transient.service transient -",
+	}}
+	manager := NewManager(executor, t.TempDir())
+	for _, name := range []string{"enabled.service", "enabled-masked.service"} {
+		symlink(t, filepath.Join(manager.root, "etc", "systemd", "system", "multi-user.target.wants", name),
+			"/usr/lib/systemd/system/"+name)
+	}
+	items, err := manager.Export(context.Background(), Unit{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		names = append(names, item.Name)
+		observed, err := manager.Get(context.Background(), Unit{Name: item.Name, Scope: item.Scope})
+		if err != nil || !reflect.DeepEqual(item, observed) {
+			t.Fatalf("Export differs from Get: %+v; Get = %+v, %v", item, observed, err)
+		}
+		if item.Scope != "system" || item.Enabled == nil || item.Masked == nil {
+			t.Fatalf("missing persistent state: %+v", item)
+		}
+		if item.Name == "failed.service" && item.State != nil {
+			t.Fatalf("failed state must not be mapped to active/inactive: %+v", item)
+		}
+		if item.Name == "worker@.service" && item.State != nil {
+			t.Fatalf("template must not export runtime state: %+v", item)
+		}
+		data, err := json.Marshal(item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var properties map[string]json.RawMessage
+		if err := json.Unmarshal(data, &properties); err != nil {
+			t.Fatal(err)
+		}
+		keys := []string{"name", "scope", "enabled", "masked", "unitFileState"}
+		if item.Name != "worker@.service" {
+			keys = append(keys, "activeState", "subState", "loadState")
+		}
+		switch item.Name {
+		case "failed.service", "activating.service", "deactivating.service", "worker@.service":
+			if item.State != nil {
+				t.Fatalf("unrepresentable runtime state: %s", data)
+			}
+		default:
+			keys = append(keys, "state")
+			want := "inactive"
+			if item.Name == "active.service" {
+				want = "active"
+			}
+			if item.State == nil || *item.State != want {
+				t.Fatalf("lost representable runtime state: %s", data)
+			}
+		}
+		if len(properties) != len(keys) {
+			t.Fatalf("Export lost the Get property set: %s", data)
+		}
+		for _, key := range keys {
+			if _, ok := properties[key]; !ok {
+				t.Fatalf("Export is missing %s: %s", key, data)
+			}
+		}
+		if *item.Enabled != (item.Name == "enabled.service" || item.Name == "enabled-masked.service") ||
+			*item.Masked != (item.Name == "masked.service" || item.Name == "enabled-masked.service") {
+			t.Fatalf("lost independent persistent state: %s", data)
+		}
+	}
+	if !slices.Equal(names, []string{"activating.service", "active.service", "deactivating.service",
+		"enabled-masked.service", "enabled.service", "failed.service", "masked.service", "worker@.service", "zeta.service"}) {
+		t.Fatalf("unexpected deterministic units: %v", names)
+	}
+	for _, item := range items {
+		if item.Name == "masked.service" && (!*item.Masked || *item.Enabled) {
+			t.Fatalf("masking and enablement were conflated: %+v", item)
+		}
+	}
+	for _, operation := range executor.calls {
+		if operation != "list-unit-files" && operation != "show" {
+			t.Fatalf("Export invoked mutating systemctl operation %q", operation)
+		}
+	}
+	filtered, err := manager.Export(context.Background(), Unit{Name: "zeta.service"})
+	if err != nil || len(filtered) != 1 || filtered[0].Name != "zeta.service" {
+		t.Fatalf("filtered export = %+v, %v", filtered, err)
+	}
+	filtered, err = manager.Export(context.Background(), Unit{Name: "zeta"})
+	if err != nil || len(filtered) != 1 || filtered[0].Name != "zeta.service" {
+		t.Fatalf("normalized name filter = %+v, %v", filtered, err)
+	}
+	user, err := manager.Export(context.Background(), Unit{Name: "zeta", Scope: "user"})
+	if err != nil || len(user) != 1 || user[0].Scope != "user" {
+		t.Fatalf("user-scope Export = %+v, %v", user, err)
+	}
+	user, err = manager.Export(context.Background(), Unit{Scope: "user"})
+	if err != nil || len(user) != len(items) {
+		t.Fatalf("scope-only Export = %+v, %v", user, err)
+	}
+	for _, item := range user {
+		if item.Scope != "user" {
+			t.Fatalf("scope-only Export lost scope: %+v", item)
+		}
+	}
+	observed, err := manager.Get(context.Background(), Unit{Name: "failed.service"})
+	if err != nil || observed.ActiveState != "failed" || observed.SubState != "dead" ||
+		observed.LoadState != "loaded" || observed.UnitFileState != "disabled" {
+		t.Fatalf("Get lost diagnostics: %+v, %v", observed, err)
+	}
+	empty, err := NewManager(&exportSystemctl{}, t.TempDir()).Export(context.Background(), Unit{})
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty unit inventory = %+v, %v", empty, err)
+	}
 }
 
 func symlink(t *testing.T, path, target string) {

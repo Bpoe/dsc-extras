@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -214,6 +215,28 @@ func TestDNFNativeInstallation(t *testing.T) {
 			t.Fatalf("unexpected DSC version %q", got)
 		}
 		t.Setenv("DSC_RESOURCE_PATH", "/usr/local/bin")
+		historyBeforeExport := history(t)
+		for _, args := range [][]string{
+			{"resource", "export", "--resource", "DscExtras.PackageManagement/packages", "--output-format", "json"},
+			{"resource", "get", "--all", "--resource", "DscExtras.PackageManagement/packages", "--output-format", "json"},
+		} {
+			output := nativeRun(t, dsc, args...)
+			if !strings.Contains(string(output), "Dscpm.Test_pkg-x:noarch") {
+				t.Fatalf("DSC %s failed to consume RPM Export:\n%s", strings.Join(args, " "), output)
+			}
+			decoder := json.NewDecoder(strings.NewReader(string(output)))
+			for {
+				var instance map[string]json.RawMessage
+				if err := decoder.Decode(&instance); err == io.EOF {
+					break
+				} else if err != nil {
+					t.Fatalf("DSC %s returned invalid JSON/JSON Lines: %v\n%s", strings.Join(args, " "), err, output)
+				}
+			}
+		}
+		if history(t) != historyBeforeExport {
+			t.Fatal("DSC Export modified the RPM inventory")
+		}
 		input := filepath.Join(dir, "input.json")
 		// Uppercase, punctuation and a version exercise the real schema too.
 		if err := os.WriteFile(input, []byte(`{"name":"Dscpm.Test_pkg-x:noarch","version":"1:1.0-1"}`), 0600); err != nil {
