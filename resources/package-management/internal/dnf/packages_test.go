@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -199,6 +200,47 @@ func TestExportEnumeratesInstalledRPMIdentities(t *testing.T) {
 	}
 	if len(executor.calls) != 2 || executor.calls[0].program != "rpm" || executor.calls[0].args[0] != "-qa" {
 		t.Fatalf("Export did not use read-only local RPM inventory: %+v", executor.calls)
+	}
+	for _, item := range items {
+		if item.Ensure != "Present" || item.State != "Present" || len(item.Packages) != 1 {
+			t.Fatalf("missing observed package properties: %+v", item)
+		}
+		state := item.Packages[0]
+		if !state.Installed || state.Status != "installed" || state.RequestedName != item.Name.Values[0] ||
+			state.Version != item.Version || state.Architecture == "" {
+			t.Fatalf("incorrect RPM observation: %+v", item)
+		}
+		observed, err := manager.Get(context.Background(), item)
+		if err != nil || !reflect.DeepEqual(item, observed) {
+			t.Fatalf("Export differs from Get: %+v; Get = %+v, %v", item, observed, err)
+		}
+	}
+	if executor.mutations != 0 || executor.preflights != 0 {
+		t.Fatalf("Export/Get mutated state: %+v", executor.calls)
+	}
+}
+
+func TestExportPreservesInstallOnlyRPMVersions(t *testing.T) {
+	executor := &fakeExecutor{t: t, comparison: -1, installed: []identity{
+		fixture("kernel", "1:1.0-1", "x86_64"),
+		fixture("kernel", "1:2.0-1", "x86_64"),
+	}}
+	manager := NewPackageManager(executor)
+	items, err := manager.Export(context.Background(), packages.Packages{
+		Name:   packages.PackageNames{Values: []string{"kernel:x86_64"}, Scalar: true},
+		Ensure: "Absent", Version: "not-observed", State: "Absent",
+	})
+	if err != nil || len(items) != 2 || items[0].Version != "1:1.0-1" || items[1].Version != "1:2.0-1" {
+		t.Fatalf("install-only Export = %+v, %v", items, err)
+	}
+	if len(executor.calls) != 1 {
+		t.Fatalf("Export made per-package invocations: %+v", executor.calls)
+	}
+	for _, item := range items {
+		observed, err := manager.Get(context.Background(), item)
+		if err != nil || !reflect.DeepEqual(item, observed) {
+			t.Fatalf("Export differs from Get for exact RPM version: %+v; Get = %+v, %v", item, observed, err)
+		}
 	}
 }
 

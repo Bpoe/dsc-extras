@@ -246,10 +246,17 @@ func (m *PackageManager) observe(ctx context.Context, entry resolvedPackage) (Pa
 			return state, fmt.Errorf("ambiguous installed architecture for %q", entry.name)
 		}
 		found = true
-		state.Status, state.Version, state.Architecture = fields[1], fields[2], fields[3]
-		state.Installed = status[1] == "ok" && status[2] == "installed"
+		state = dpkgPackageState(entry.input, entry.name, fields[1], fields[2], fields[3])
 	}
 	return state, nil
+}
+
+func dpkgPackageState(input, name, status, version, architecture string) PackageState {
+	fields := strings.Fields(status)
+	return PackageState{
+		RequestedName: input, Name: name, Status: status, Version: version, Architecture: architecture,
+		Installed: len(fields) == 3 && fields[1] == "ok" && fields[2] == "installed",
+	}
 }
 
 func (m *PackageManager) Export(ctx context.Context, filter Packages) ([]Packages, error) {
@@ -280,7 +287,7 @@ func (m *PackageManager) Export(ctx context.Context, filter Packages) ([]Package
 	if err != nil {
 		return nil, err
 	}
-	type installedPackage struct{ name, version, architecture string }
+	type installedPackage struct{ name, status, version, architecture string }
 	var installed []installedPackage
 	archCount := map[string]int{}
 	for _, line := range strings.Split(strings.TrimSuffix(string(output), "\n"), "\n") {
@@ -302,7 +309,7 @@ func (m *PackageManager) Export(ctx context.Context, filter Packages) ([]Package
 		if !packageToken.MatchString(name) || !packageArchitecture.MatchString(fields[3]) || fields[2] == "" {
 			return nil, fmt.Errorf("invalid installed dpkg package identity %q", fields[0])
 		}
-		installed = append(installed, installedPackage{name, fields[2], fields[3]})
+		installed = append(installed, installedPackage{name, fields[1], fields[2], fields[3]})
 		archCount[name]++
 	}
 	for _, item := range installed {
@@ -336,7 +343,12 @@ func (m *PackageManager) Export(ctx context.Context, filter Packages) ([]Package
 		}
 		result = append(result, Packages{
 			Name:    PackageNames{Values: []string{name}, Scalar: true},
+			Ensure:  "Present",
 			Version: item.version,
+			State:   "Present",
+			Packages: []PackageState{
+				dpkgPackageState(name, item.name, item.status, item.version, item.architecture),
+			},
 		})
 	}
 	return result, nil

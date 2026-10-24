@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -201,7 +202,7 @@ func TestDSCIntegration(t *testing.T) {
 						exported.Enabled == nil || *exported.Enabled || exported.Masked == nil || *exported.Masked {
 						t.Fatalf("incorrect exported properties: %s (%v)", data, err)
 					}
-					wantKeys := 4
+					wantKeys := 8
 					if state == "active" || state == "inactive" {
 						wantKeys++
 						if exported.State == nil || *exported.State != state {
@@ -211,7 +212,13 @@ func TestDSCIntegration(t *testing.T) {
 						t.Fatalf("guessed runtime state: %s", data)
 					}
 					if len(properties) != wantKeys {
-						t.Fatalf("Export included diagnostics: %s", data)
+						t.Fatalf("Export lost observed properties: %s", data)
+					}
+					get := invoke("get", string(data))
+					var observed services.Unit
+					if err := json.Unmarshal(get["actualState"], &observed); err != nil ||
+						!reflect.DeepEqual(exported, observed) {
+						t.Fatalf("Export differs from Get: %s; Get = %s, %v", data, get["actualState"], err)
 					}
 				}
 			}

@@ -100,6 +100,10 @@ func TestExportEnumeratesRepresentableUnitsDeterministically(t *testing.T) {
 	names := make([]string, 0, len(items))
 	for _, item := range items {
 		names = append(names, item.Name)
+		observed, err := manager.Get(context.Background(), Unit{Name: item.Name, Scope: item.Scope})
+		if err != nil || !reflect.DeepEqual(item, observed) {
+			t.Fatalf("Export differs from Get: %+v; Get = %+v, %v", item, observed, err)
+		}
 		if item.Scope != "system" || item.Enabled == nil || item.Masked == nil {
 			t.Fatalf("missing persistent state: %+v", item)
 		}
@@ -117,7 +121,10 @@ func TestExportEnumeratesRepresentableUnitsDeterministically(t *testing.T) {
 		if err := json.Unmarshal(data, &properties); err != nil {
 			t.Fatal(err)
 		}
-		keys := []string{"name", "scope", "enabled", "masked"}
+		keys := []string{"name", "scope", "enabled", "masked", "unitFileState"}
+		if item.Name != "worker@.service" {
+			keys = append(keys, "activeState", "subState", "loadState")
+		}
 		switch item.Name {
 		case "failed.service", "activating.service", "deactivating.service", "worker@.service":
 			if item.State != nil {
@@ -134,7 +141,7 @@ func TestExportEnumeratesRepresentableUnitsDeterministically(t *testing.T) {
 			}
 		}
 		if len(properties) != len(keys) {
-			t.Fatalf("Export includes read-only properties: %s", data)
+			t.Fatalf("Export lost the Get property set: %s", data)
 		}
 		for _, key := range keys {
 			if _, ok := properties[key]; !ok {

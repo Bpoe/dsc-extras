@@ -212,10 +212,12 @@ deterministically and are read-only.
 Groups are enumerated from `/etc/group`; NSS-only groups are not exported.
 Services enumerate unit files visible to the selected systemd manager, omit
 aliases and transient/generated units, and export only `active`/`inactive`
-states when systemd reports those exact states. Export includes only configurable
-properties (`name`, `scope`, representable `state`, `enabled`, and `masked`);
-Get's read-only diagnostics are not included. Failed and transitional units
-retain their persistent enablement and masking without a guessed runtime state.
+states when systemd reports those exact states. Export returns the same observed
+instance as Get, including `activeState`, `subState`, `loadState`, and
+`unitFileState` diagnostics where applicable. Failed and transitional units
+retain their diagnostics, persistent enablement, and masking without a guessed
+runtime `state`. All operations share the resource instance schema; the separate
+Export filter schema only allows optional enumeration selectors.
 The default scope is `system`;
 select `scope: user` to enumerate the calling user's manager. A user manager
 must be available in the current login session.

@@ -72,6 +72,12 @@ func TestExportEnumeratesLocalGroupsDeterministicallyAndReadOnly(t *testing.T) {
 		!slices.Equal(*items[0].Members, []string{"alice", "bob"}) {
 		t.Fatalf("unexpected export: %+v", items)
 	}
+	for _, item := range items {
+		observed, err := manager.Get(context.Background(), item)
+		if err != nil || !reflect.DeepEqual(item, observed) {
+			t.Fatalf("Export differs from Get: %+v; Get = %+v, %v", item, observed, err)
+		}
+	}
 	filtered, err := manager.Export(context.Background(), Group{Name: "zeta"})
 	if err != nil || len(filtered) != 1 || filtered[0].Name != "zeta" {
 		t.Fatalf("filtered export = %+v, %v", filtered, err)

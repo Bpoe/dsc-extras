@@ -59,6 +59,13 @@ func (p identity) evr() string   { return p.epoch + ":" + p.version + "-" + p.re
 func (p identity) nevra() string { return p.name + "-" + p.evr() + "." + p.arch }
 func (p identity) key() string   { return p.name + ":" + p.arch }
 
+func (p identity) observed(input string) packages.PackageState {
+	return packages.PackageState{
+		RequestedName: input, Name: p.name, Version: p.evr(), Architecture: p.arch,
+		Installed: true, Status: "installed",
+	}
+}
+
 func normalizeEpoch(epoch string) (string, error) {
 	if epoch == "" || epoch == "(none)" {
 		return "0", nil
@@ -340,8 +347,7 @@ func (m *PackageManager) inspect(ctx context.Context, desired packages.Packages,
 			}
 		}
 		if selected != nil {
-			state.Installed, state.Status = true, "installed"
-			state.Version, state.Architecture = selected.evr(), selected.arch
+			state = selected.observed(entry.input)
 			installed++
 			compliant[i] = exact
 			if !exact && !slices.Contains(differences, "version") {

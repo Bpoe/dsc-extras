@@ -109,15 +109,43 @@ func TestExportUsesInstalledDpkgInventoryAndArchitectureIdentity(t *testing.T) {
 		items[0].Version != "3.137" || items[1].Version != "2:1.0-3" {
 		t.Fatalf("unexpected package export: %+v", items)
 	}
+	for _, item := range items {
+		if item.Ensure != "Present" || item.State != "Present" || len(item.Packages) != 1 {
+			t.Fatalf("missing observed package properties: %+v", item)
+		}
+		state := item.Packages[0]
+		if !state.Installed || state.RequestedName != item.Name.Values[0] ||
+			state.Version != item.Version || state.Architecture == "" || state.Status == "" {
+			t.Fatalf("incorrect package observation: %+v", item)
+		}
+		var rows strings.Builder
+		for _, line := range strings.Split(strings.TrimSpace(inventory), "\n") {
+			name := strings.SplitN(line, "\t", 2)[0]
+			if name == state.Name || strings.HasPrefix(name, state.Name+":") {
+				rows.WriteString(line + "\n")
+			}
+		}
+		getSteps := append(architectureSteps(), packageVersion(item.Version),
+			packageQuery(state.Name, rows.String()), packageComparison(item.Version, "eq", item.Version, true))
+		getManager := packageManagerFixture(t, getSteps...)
+		observed, err := getManager.Get(context.Background(), item)
+		if err != nil || !reflect.DeepEqual(item, observed) {
+			t.Fatalf("Export differs from Get: %+v; Get = %+v, %v", item, observed, err)
+		}
+	}
 	filtered := packageManagerFixture(t,
 		packageStep{program: "dpkg", args: []string{"--print-architecture"}, stdout: "amd64\n"},
 		packageStep{program: "dpkg-query", args: inventoryArgs, stdout: inventory},
 	)
 	filteredItems, err := filtered.Export(context.Background(), Packages{
-		Name: PackageNames{Values: []string{"libfoo:arm64"}, Scalar: true},
+		Name:   PackageNames{Values: []string{"libfoo:arm64"}, Scalar: true},
+		Ensure: "Absent", Version: "not-observed", State: "Absent",
 	})
 	if err != nil || len(filteredItems) != 1 || filteredItems[0].Name.Values[0] != "libfoo:arm64" {
 		t.Fatalf("filtered Export = %+v, %v", filteredItems, err)
+	}
+	if !reflect.DeepEqual(filteredItems[0], items[2]) {
+		t.Fatalf("Export copied requested values instead of observed state: %+v", filteredItems)
 	}
 }
 

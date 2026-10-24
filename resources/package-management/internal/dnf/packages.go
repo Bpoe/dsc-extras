@@ -49,7 +49,12 @@ func (m *PackageManager) Export(ctx context.Context, filter packages.Packages) (
 		}
 		result = append(result, packages.Packages{
 			Name:    packages.PackageNames{Values: []string{name}, Scalar: true},
+			Ensure:  "Present",
 			Version: item.evr(),
+			State:   "Present",
+			Packages: []packages.PackageState{
+				item.observed(name),
+			},
 		})
 	}
 	return result, nil

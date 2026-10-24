@@ -68,6 +68,10 @@ func TestExportDiscoversLogicalRepositoriesReadOnlyAndWithFilter(t *testing.T) {
 		t.Fatalf("Export returned %d logical repositories, want 5: %+v", len(items), items)
 	}
 	for i, item := range items {
+		observed, err := store.Get(item)
+		if err != nil || !reflect.DeepEqual(item, observed) {
+			t.Fatalf("Export differs from Get: %+v; Get = %+v, %v", item, observed, err)
+		}
 		if item.Ensure != "Present" || item.Name == "" || item.URI == "" || item.Suite == "" {
 			t.Fatalf("invalid exported repository: %+v", item)
 		}

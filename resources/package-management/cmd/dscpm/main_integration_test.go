@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/apt"
+	"github.com/Bpoe/dsc-extras/resources/package-management/internal/dnf"
+	"github.com/Bpoe/dsc-extras/resources/package-management/internal/packages"
 )
 
 // DSC invokes this test executable so the real command uses an isolated APT root.
@@ -25,10 +28,78 @@ func TestDSCResourceProcess(t *testing.T) {
 	}
 	for i, arg := range os.Args {
 		if arg == "--" {
+			args := os.Args[i+1:]
+			if backend := os.Getenv("DSCPM_TEST_PACKAGE_BACKEND"); backend != "" && len(args) > 0 && args[0] == "packages" {
+				executor := integrationPackageExecutor{empty: os.Getenv("DSCPM_TEST_PACKAGE_EMPTY") == "1"}
+				var manager packages.Manager
+				switch backend {
+				case "apt":
+					manager = apt.NewPackageManager(executor)
+				case "dnf":
+					manager = dnf.NewPackageManager(executor)
+				default:
+					t.Fatalf("unknown fixture backend %q", backend)
+				}
+				os.Exit(runPackages(t.Context(), args[1:], os.Stdin, os.Stdout, os.Stderr, manager))
+			}
 			os.Exit(run(os.Args[i+1:], os.Stdin, os.Stdout, os.Stderr, apt.NewStore(root)))
 		}
 	}
 	t.Fatal("missing resource arguments")
+}
+
+type integrationPackageExecutor struct{ empty bool }
+
+func (f integrationPackageExecutor) Execute(_ context.Context, program string, args, _ []string) ([]byte, []byte, error) {
+	switch program {
+	case "dpkg":
+		if slices.Equal(args, []string{"--print-architecture"}) {
+			return []byte("amd64\n"), nil, nil
+		}
+		if slices.Equal(args, []string{"--print-foreign-architectures"}) {
+			return []byte("arm64\n"), nil, nil
+		}
+		if len(args) == 2 && args[0] == "--validate-version" && (args[1] == "2:1.0-3" || args[1] == "1.0") {
+			return nil, nil, nil
+		}
+		if len(args) == 4 && args[0] == "--compare-versions" && args[2] == "eq" && args[1] == args[3] {
+			return nil, nil, nil
+		}
+	case "dpkg-query":
+		if len(args) >= 2 && args[0] == "--show" &&
+			args[1] == "--showformat=${binary:Package}\t${Status}\t${Version}\t${Architecture}\n" {
+			inventory := []string{
+				"alpha:amd64\thold ok installed\t2:1.0-3\tamd64\n",
+				"alpha:arm64\tinstall ok installed\t2:1.0-3\tarm64\n",
+				"universal\tinstall ok installed\t1.0\tall\n",
+			}
+			if f.empty {
+				return nil, nil, nil
+			}
+			var output strings.Builder
+			for _, row := range inventory {
+				if len(args) == 2 || len(args) == 4 && args[2] == "--" &&
+					(strings.HasPrefix(row, args[3]+"\t") || strings.HasPrefix(row, args[3]+":")) {
+					output.WriteString(row)
+				}
+			}
+			return []byte(output.String()), nil, nil
+		}
+	case "rpm":
+		if slices.Equal(args, []string{"-qa", "--queryformat", "%{NAME}\t%{EPOCH}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\n"}) {
+			if f.empty {
+				return nil, nil, nil
+			}
+			return []byte("alpha\t2\t1.0\t3\tx86_64\nalpha\t2\t1.0\t3\ti686\nuniversal\t(none)\t1.0\t1\tnoarch\n"), nil, nil
+		}
+		if slices.Equal(args, []string{"--eval", "%{_arch}"}) {
+			return []byte("x86_64\n"), nil, nil
+		}
+		if slices.Equal(args, []string{"--showrc"}) {
+			return []byte("compatible archs : x86_64 noarch i686\n"), nil, nil
+		}
+	}
+	return nil, nil, fmt.Errorf("unexpected or mutating package command: %s %q", program, args)
 }
 
 func TestDSCStateAndDiffIntegration(t *testing.T) {
@@ -64,6 +135,85 @@ func TestDSCPackagesExportIntegration(t *testing.T) {
 				t.Fatalf("DSC %s returned invalid JSON/JSON Lines: %v\n%s", strings.Join(args, " "), err, output)
 			}
 		}
+	}
+}
+
+func TestDSCPackagesObservedExportIntegration(t *testing.T) {
+	for _, backend := range []string{"apt", "dnf"} {
+		t.Run(backend, func(t *testing.T) {
+			t.Setenv("DSCAPT_TEST_ROOT", makeStore(t).Root)
+			t.Setenv("DSCPM_TEST_PACKAGE_BACKEND", backend)
+			dsc, resourceType := prepareDSCResource(t, "packages.dsc.resource.json")
+			qualified := "alpha:arm64"
+			if backend == "dnf" {
+				qualified = "alpha:i686"
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+			defer cancel()
+			invoke := func(operation, input string) []byte {
+				t.Helper()
+				args := []string{"resource", operation, "--resource", resourceType, "--output-format", "json"}
+				if input != "" {
+					args = append(args, "--input", input)
+				}
+				command := exec.CommandContext(ctx, dsc, args...)
+				var stderr strings.Builder
+				command.Stderr = &stderr
+				output, err := command.Output()
+				if err != nil {
+					t.Fatalf("DSC %s: %v\n%s\n%s", strings.Join(args, " "), err, output, stderr.String())
+				}
+				return output
+			}
+			for _, test := range []struct {
+				input string
+				count int
+				empty bool
+			}{
+				{"", 3, false},
+				{`{"name":"alpha"}`, 2, false},
+				{`{"name":"` + qualified + `"}`, 1, false},
+				{`{"name":["universal"]}`, 1, false},
+				{`{"name":"missing"}`, 0, false},
+				{"", 0, true},
+			} {
+				empty := "0"
+				if test.empty {
+					empty = "1"
+				}
+				t.Setenv("DSCPM_TEST_PACKAGE_EMPTY", empty)
+				output := invoke("export", test.input)
+				var config struct {
+					Resources []struct {
+						Properties packages.Packages
+					}
+				}
+				if err := json.Unmarshal(output, &config); err != nil || len(config.Resources) != test.count {
+					t.Fatalf("Export = %s, %v; want %d instances", output, err, test.count)
+				}
+				for _, resource := range config.Resources {
+					exported := resource.Properties
+					if exported.Ensure != "Present" || exported.State != "Present" || exported.Version == "" ||
+						len(exported.Packages) != 1 || !exported.Packages[0].Installed ||
+						exported.Packages[0].RequestedName != exported.Name.Values[0] ||
+						exported.Packages[0].Version != exported.Version || exported.Packages[0].Architecture == "" {
+						t.Fatalf("Export omitted or invented observations: %+v", exported)
+					}
+					input, err := json.Marshal(exported)
+					if err != nil {
+						t.Fatal(err)
+					}
+					// DSC validates the exported instance against the shared resource schema before Get.
+					get := invoke("get", string(input))
+					var result struct {
+						ActualState packages.Packages
+					}
+					if err := json.Unmarshal(get, &result); err != nil || !reflect.DeepEqual(exported, result.ActualState) {
+						t.Fatalf("Export differs from Get: %s; Get = %s, %v", input, get, err)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -125,6 +275,25 @@ func TestDSCRepositoryExportFilterIntegration(t *testing.T) {
 						}
 						if _, diff, err := store.Test(exported); err != nil || len(diff) != 0 {
 							t.Fatalf("Export differs from existing source: %v, %v", diff, err)
+						}
+						observed, err := store.Get(exported)
+						if err != nil || !reflect.DeepEqual(exported, observed) {
+							t.Fatalf("Export differs from Get: %+v; Get = %+v, %v", exported, observed, err)
+						}
+						get := exec.CommandContext(t.Context(), dsc, "resource", "get", "--resource", resourceType,
+							"--file", "-", "--output-format", "json")
+						instance, err := json.Marshal(exported)
+						if err != nil {
+							t.Fatal(err)
+						}
+						get.Stdin = bytes.NewReader(instance)
+						getOutput, err := get.Output()
+						var getResult struct {
+							ActualState apt.Repository
+						}
+						if err != nil || json.Unmarshal(getOutput, &getResult) != nil ||
+							!reflect.DeepEqual(exported, getResult.ActualState) {
+							t.Fatalf("DSC Get rejected or changed exported instance: %s, %v", getOutput, err)
 						}
 					}
 					if after, err := os.ReadFile(path); err != nil || !bytes.Equal(content, after) {

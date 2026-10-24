@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -220,8 +221,17 @@ func TestDNFNativeInstallation(t *testing.T) {
 			{"resource", "get", "--all", "--resource", "DscExtras.PackageManagement/packages", "--output-format", "json"},
 		} {
 			output := nativeRun(t, dsc, args...)
-			if !json.Valid(output) || !strings.Contains(string(output), "Dscpm.Test_pkg-x:noarch") {
+			if !strings.Contains(string(output), "Dscpm.Test_pkg-x:noarch") {
 				t.Fatalf("DSC %s failed to consume RPM Export:\n%s", strings.Join(args, " "), output)
+			}
+			decoder := json.NewDecoder(strings.NewReader(string(output)))
+			for {
+				var instance map[string]json.RawMessage
+				if err := decoder.Decode(&instance); err == io.EOF {
+					break
+				} else if err != nil {
+					t.Fatalf("DSC %s returned invalid JSON/JSON Lines: %v\n%s", strings.Join(args, " "), err, output)
+				}
 			}
 		}
 		if history(t) != historyBeforeExport {
