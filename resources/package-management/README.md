@@ -78,7 +78,13 @@ where needed to preserve package identity. Like Get, each exported instance
 includes `ensure: Present`, the observed aggregate `state: Present`, and
 `packages` containing its installed status, version, architecture, and requested
 identity. These observations come from the same batched local inventory, without
-per-package manager invocations. Export uses the same resource instance schema
+per-package manager invocations. APT Get and Export share dpkg record parsing:
+installation requires an `ok installed` status regardless of the requested
+selection (`install`, `hold`, `deinstall`, or `purge`). Pending-removal packages
+are still exported while installed; residual configuration and partial
+installations are not. The complete original dpkg status is retained, and
+malformed records fail rather than being silently skipped.
+Export uses the same resource instance schema
 as Get, Test, and Set, and requires no input. Exported resources can be placed
 directly in a DSC configuration or piped through DSC's `resource export`
 output options.

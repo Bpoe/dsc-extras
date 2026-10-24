@@ -223,40 +223,54 @@ func (m *PackageManager) observe(ctx context.Context, entry resolvedPackage) (Pa
 	}
 	found := false
 	for _, line := range strings.Split(strings.TrimSuffix(string(output), "\n"), "\n") {
-		fields := strings.Split(line, "\t")
-		if len(fields) != 4 || (fields[0] != entry.name && fields[0] != entry.name+":"+fields[3]) {
+		record, err := parseDpkgPackageRecord(line)
+		if err != nil {
+			return state, err
+		}
+		if record.Name != entry.name {
 			return state, fmt.Errorf("unexpected dpkg-query output for %q", entry.name)
 		}
-		status := strings.Fields(fields[1])
-		if len(status) != 3 || !slices.Contains([]string{"unknown", "install", "hold", "deinstall", "purge"}, status[0]) ||
-			!slices.Contains([]string{"ok", "reinstreq"}, status[1]) ||
-			!slices.Contains([]string{"not-installed", "config-files", "half-installed", "unpacked", "half-configured", "triggers-awaited", "triggers-pending", "installed"}, status[2]) {
-			return state, fmt.Errorf("unexpected dpkg status for %q", entry.name)
-		}
-		if fields[3] == "" && status[2] == "not-installed" {
+		if record.Architecture == "" {
 			continue
 		}
-		if !packageArchitecture.MatchString(fields[3]) {
-			return state, fmt.Errorf("unexpected dpkg architecture for %q", entry.name)
-		}
-		if fields[3] != entry.architecture && (entry.local || fields[3] != "all") {
+		if record.Architecture != entry.architecture && (entry.local || record.Architecture != "all") {
 			continue
 		}
 		if found {
 			return state, fmt.Errorf("ambiguous installed architecture for %q", entry.name)
 		}
 		found = true
-		state = dpkgPackageState(entry.input, entry.name, fields[1], fields[2], fields[3])
+		record.RequestedName = entry.input
+		state = record
 	}
 	return state, nil
 }
 
-func dpkgPackageState(input, name, status, version, architecture string) PackageState {
-	fields := strings.Fields(status)
-	return PackageState{
-		RequestedName: input, Name: name, Status: status, Version: version, Architecture: architecture,
-		Installed: len(fields) == 3 && fields[1] == "ok" && fields[2] == "installed",
+func parseDpkgPackageRecord(line string) (PackageState, error) {
+	fields := strings.Split(line, "\t")
+	if len(fields) != 4 {
+		return PackageState{}, fmt.Errorf("invalid dpkg-query record %q", line)
 	}
+	name, architecture, qualified := strings.Cut(fields[0], ":")
+	if !packageToken.MatchString(name) || qualified && (architecture == "" || architecture != fields[3]) {
+		return PackageState{}, fmt.Errorf("invalid dpkg package identity %q", fields[0])
+	}
+	status := strings.Fields(fields[1])
+	if len(status) != 3 || !slices.Contains([]string{"unknown", "install", "hold", "deinstall", "purge"}, status[0]) ||
+		!slices.Contains([]string{"ok", "reinstreq"}, status[1]) ||
+		!slices.Contains([]string{"not-installed", "config-files", "half-installed", "unpacked", "half-configured", "triggers-awaited", "triggers-pending", "installed"}, status[2]) {
+		return PackageState{}, fmt.Errorf("unexpected dpkg status for %q", name)
+	}
+	if !(fields[3] == "" && status[2] == "not-installed") && !packageArchitecture.MatchString(fields[3]) {
+		return PackageState{}, fmt.Errorf("unexpected dpkg architecture for %q", name)
+	}
+	installed := status[1] == "ok" && status[2] == "installed"
+	if installed && fields[2] == "" {
+		return PackageState{}, fmt.Errorf("missing installed dpkg package version for %q", name)
+	}
+	return PackageState{
+		Name: name, Status: fields[1], Version: fields[2], Architecture: fields[3], Installed: installed,
+	}, nil
 }
 
 func (m *PackageManager) Export(ctx context.Context, filter Packages) ([]Packages, error) {
@@ -283,56 +297,46 @@ func (m *PackageManager) Export(ctx context.Context, filter Packages) ([]Package
 	if !packageArchitecture.MatchString(native) || native == "all" {
 		return nil, errors.New("dpkg returned an invalid native architecture")
 	}
-	output, err := m.run(ctx, "dpkg-query", "--show", "--showformat=${binary:Package}\t${Status}\t${Version}\t${Architecture}\n")
+	output, err := m.run(ctx, "dpkg-query", "--show", packageQueryFormat)
 	if err != nil {
 		return nil, err
 	}
-	type installedPackage struct{ name, status, version, architecture string }
-	var installed []installedPackage
+	var installed []PackageState
 	archCount := map[string]int{}
 	for _, line := range strings.Split(strings.TrimSuffix(string(output), "\n"), "\n") {
 		if line == "" {
 			continue
 		}
-		fields := strings.Split(line, "\t")
-		if len(fields) != 4 {
-			return nil, fmt.Errorf("invalid dpkg package inventory row %q", line)
+		record, err := parseDpkgPackageRecord(line)
+		if err != nil {
+			return nil, err
 		}
-		status := strings.Fields(fields[1])
-		if len(status) != 3 {
-			return nil, fmt.Errorf("invalid dpkg package status for %q", fields[0])
+		if record.Installed {
+			installed = append(installed, record)
+			archCount[record.Name]++
 		}
-		if (status[0] != "install" && status[0] != "hold") || status[1] != "ok" || status[2] != "installed" {
-			continue
-		}
-		name := strings.TrimSuffix(fields[0], ":"+fields[3])
-		if !packageToken.MatchString(name) || !packageArchitecture.MatchString(fields[3]) || fields[2] == "" {
-			return nil, fmt.Errorf("invalid installed dpkg package identity %q", fields[0])
-		}
-		installed = append(installed, installedPackage{name, fields[1], fields[2], fields[3]})
-		archCount[name]++
 	}
 	for _, item := range installed {
-		if item.architecture == "all" && archCount[item.name] > 1 {
-			return nil, fmt.Errorf("cannot export %q installed as architecture all alongside another architecture; package identity is ambiguous", item.name)
+		if item.Architecture == "all" && archCount[item.Name] > 1 {
+			return nil, fmt.Errorf("cannot export %q installed as architecture all alongside another architecture; package identity is ambiguous", item.Name)
 		}
 	}
-	slices.SortFunc(installed, func(a, b installedPackage) int {
-		if order := strings.Compare(a.name, b.name); order != 0 {
+	slices.SortFunc(installed, func(a, b PackageState) int {
+		if order := strings.Compare(a.Name, b.Name); order != 0 {
 			return order
 		}
-		return strings.Compare(a.architecture, b.architecture)
+		return strings.Compare(a.Architecture, b.Architecture)
 	})
 	result := make([]Packages, 0, len(installed))
 	for _, item := range installed {
-		name := item.name
-		if item.architecture != "all" && (item.architecture != native || archCount[name] > 1) {
-			name += ":" + item.architecture
+		name := item.Name
+		if item.Architecture != "all" && (item.Architecture != native || archCount[name] > 1) {
+			name += ":" + item.Architecture
 		}
 		if filter.Name.Scalar || len(filter.Name.Values) > 0 {
 			matched := false
 			for _, requested := range filter.Name.Values {
-				if requested == name || requested == item.name || requested == item.name+":"+item.architecture {
+				if requested == name || requested == item.Name || requested == item.Name+":"+item.Architecture {
 					matched = true
 					break
 				}
@@ -341,14 +345,13 @@ func (m *PackageManager) Export(ctx context.Context, filter Packages) ([]Package
 				continue
 			}
 		}
+		item.RequestedName = name
 		result = append(result, Packages{
-			Name:    PackageNames{Values: []string{name}, Scalar: true},
-			Ensure:  "Present",
-			Version: item.version,
-			State:   "Present",
-			Packages: []PackageState{
-				dpkgPackageState(name, item.name, item.status, item.version, item.architecture),
-			},
+			Name:     PackageNames{Values: []string{name}, Scalar: true},
+			Ensure:   "Present",
+			Version:  item.Version,
+			State:    "Present",
+			Packages: []PackageState{item},
 		})
 	}
 	return result, nil

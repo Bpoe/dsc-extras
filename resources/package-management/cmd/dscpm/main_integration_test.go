@@ -69,8 +69,8 @@ func (f integrationPackageExecutor) Execute(_ context.Context, program string, a
 		if len(args) >= 2 && args[0] == "--show" &&
 			args[1] == "--showformat=${binary:Package}\t${Status}\t${Version}\t${Architecture}\n" {
 			inventory := []string{
-				"alpha:amd64\thold ok installed\t2:1.0-3\tamd64\n",
-				"alpha:arm64\tinstall ok installed\t2:1.0-3\tarm64\n",
+				"alpha:amd64\tdeinstall ok installed\t2:1.0-3\tamd64\n",
+				"alpha:arm64\tpurge ok installed\t2:1.0-3\tarm64\n",
 				"universal\tinstall ok installed\t1.0\tall\n",
 			}
 			if f.empty {
