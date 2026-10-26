@@ -83,6 +83,11 @@
             "additionalProperties": false
           }
         },
+        "_name": {
+          "description": "RFC 3986 percent-encoded export label used by DSC as the top-level resource name: name for APT packages, name,version for RPM packages.",
+          "type": "string",
+          "readOnly": true
+        },
         "_inDesiredState": {"type": ["boolean", "null"], "readOnly": true}
       },
       "allOf": [

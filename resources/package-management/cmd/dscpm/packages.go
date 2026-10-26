@@ -54,8 +54,17 @@ func runPackages(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		if err != nil {
 			return reportError(stderr, err.Error())
 		}
+		_, rpm := manager.(*dnf.PackageManager)
 		for _, item := range items {
-			if code := writeJSON(stdout, item, stderr); code != 0 {
+			name := item.Name.Values[0]
+			if rpm {
+				name += "," + item.Version
+			}
+			result := struct {
+				packages.Packages
+				ExportName string `json:"_name"`
+			}{item, encodeExportName(name)}
+			if code := writeJSON(stdout, result, stderr); code != 0 {
 				return code
 			}
 		}

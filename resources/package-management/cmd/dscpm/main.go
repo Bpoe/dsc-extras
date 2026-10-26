@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -81,7 +82,11 @@ func runAPTRepositories(args []string, stdin io.Reader, stdout, stderr io.Writer
 			return reportError(stderr, err.Error())
 		}
 		for _, item := range items {
-			if code := writeJSON(stdout, item, stderr); code != 0 {
+			result := struct {
+				apt.Repository
+				ExportName string `json:"_name"`
+			}{item, encodeExportName(item.Name)}
+			if code := writeJSON(stdout, result, stderr); code != 0 {
 				return code
 			}
 		}
@@ -179,6 +184,10 @@ func readInput(input io.Reader) (apt.Repository, error) {
 		return apt.Repository{}, err
 	}
 	return instance, nil
+}
+
+func encodeExportName(name string) string {
+	return strings.ReplaceAll(url.QueryEscape(name), "+", "%20")
 }
 
 func writeJSON(stdout io.Writer, value any, stderr io.Writer) int {

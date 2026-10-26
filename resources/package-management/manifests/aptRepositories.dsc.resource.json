@@ -95,6 +95,11 @@
           "type": "boolean",
           "default": true
         },
+        "_name": {
+          "description": "RFC 3986 percent-encoded export label used by DSC as the top-level resource name.",
+          "type": "string",
+          "readOnly": true
+        },
         "_inDesiredState": {
           "title": "Instance is in the desired state",
           "description": "Read-only result of the resource's Test operation.",
