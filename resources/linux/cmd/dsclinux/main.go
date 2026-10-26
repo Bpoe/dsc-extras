@@ -204,14 +204,22 @@ func writeJSON(stdout io.Writer, value any, stderr io.Writer) int {
 	return 0
 }
 
+func encodeExportName(name string) string {
+	return strings.ReplaceAll(url.QueryEscape(name), "+", "%20")
+}
+
 func writeJSONLines(stdout io.Writer, values any, stderr io.Writer) int {
 	items, ok := values.([]services.Unit)
 	if ok {
 		for _, item := range items {
+			name := item.Name
+			if item.Scope != "" && item.Scope != "system" {
+				name += "," + item.Scope
+			}
 			result := struct {
 				services.Unit
 				ExportName string `json:"_name"`
-			}{item, url.QueryEscape(item.Name)}
+			}{item, encodeExportName(name)}
 			if code := writeJSON(stdout, result, stderr); code != 0 {
 				return code
 			}
@@ -226,7 +234,7 @@ func writeJSONLines(stdout io.Writer, values any, stderr io.Writer) int {
 		result := struct {
 			groups.Group
 			ExportName string `json:"_name"`
-		}{item, url.QueryEscape(item.Name)}
+		}{item, encodeExportName(item.Name)}
 		if code := writeJSON(stdout, result, stderr); code != 0 {
 			return code
 		}

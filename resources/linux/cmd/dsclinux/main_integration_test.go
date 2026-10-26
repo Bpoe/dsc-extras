@@ -195,11 +195,15 @@ func TestDSCIntegration(t *testing.T) {
 					t.Fatalf("filtered Export = %s, %v", output, err)
 				}
 				for i, resource := range config.Resources {
+					name := filter.names[i]
+					if filter.scope != "system" {
+						name += "," + filter.scope
+					}
 					properties := resource.Properties
 					var exported services.Unit
 					data, err := json.Marshal(properties)
 					if err != nil || json.Unmarshal(data, &exported) != nil ||
-						resource.Name != filter.names[i] || exported.Name != filter.names[i] || exported.Scope != filter.scope ||
+						resource.Name != encodeExportName(name) || exported.Name != filter.names[i] || exported.Scope != filter.scope ||
 						exported.Enabled == nil || *exported.Enabled || exported.Masked == nil || *exported.Masked {
 						t.Fatalf("incorrect exported properties: %s (%v)", data, err)
 					}

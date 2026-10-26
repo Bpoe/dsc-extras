@@ -96,7 +96,7 @@
           "default": true
         },
         "_name": {
-          "description": "URL-encoded export metadata used by DSC as the top-level resource name.",
+          "description": "RFC 3986 percent-encoded export label used by DSC as the top-level resource name.",
           "type": "string",
           "readOnly": true
         },

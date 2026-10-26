@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/apt"
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/dnf"
@@ -64,7 +63,7 @@ func runPackages(ctx context.Context, args []string, stdin io.Reader, stdout, st
 			result := struct {
 				packages.Packages
 				ExportName string `json:"_name"`
-			}{item, url.QueryEscape(name)}
+			}{item, encodeExportName(name)}
 			if code := writeJSON(stdout, result, stderr); code != 0 {
 				return code
 			}

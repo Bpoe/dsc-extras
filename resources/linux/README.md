@@ -202,11 +202,14 @@ dsc resource export --resource DscExtras.Linux/services --input '{"scope":"user"
 ```
 
 Export emits JSON Lines from `dsclinux`; DSC owns the resulting configuration
-document. Each exported instance includes `_name` as a URL-encoded copy of its
-existing `name` property, so DSC uses the encoded group or unit name as the
-top-level resource name. URL query encoding escapes reserved characters and
-UTF-8 bytes with `%HH` sequences and represents spaces as `+`; the original
-`name` property is unchanged.
+document. Each exported instance includes `_name` as an RFC 3986
+percent-encoded resource label. Groups and system-scoped services use `name`;
+non-system-scoped services use the compound `name,scope`, so a user service
+cannot collide with a system service of the same name. For example,
+`example.service` in user scope becomes `example.service%2Cuser`.
+Encoding leaves only ASCII letters, digits, and `-._~` unchanged; spaces become
+`%20`, literal `+` becomes `%2B`, and other bytes use `%HH` sequences.
+The original `name` and `scope` properties are unchanged.
 An optional resource-shaped filter can be supplied with DSC's
 `--input` or `--file` options. Groups match the exact `name`; services match
 the optional exact `name` and `scope` (`system` by default). A scope-only filter

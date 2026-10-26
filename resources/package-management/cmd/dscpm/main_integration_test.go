@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -207,7 +206,7 @@ func TestDSCPackagesObservedExportIntegration(t *testing.T) {
 					}
 					if exported.Ensure != "Present" || exported.State != "Present" || exported.Version == "" ||
 						len(exported.Packages) != 1 || !exported.Packages[0].Installed ||
-						resource.Name != url.QueryEscape(name) ||
+						resource.Name != encodeExportName(name) ||
 						exported.Packages[0].RequestedName != exported.Name.Values[0] ||
 						exported.Packages[0].Version != exported.Version || exported.Packages[0].Architecture == "" {
 						t.Fatalf("Export omitted or invented observations: %+v", exported)

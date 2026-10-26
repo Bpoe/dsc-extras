@@ -187,6 +187,24 @@ func (f exportPackagesFixture) Export(_ context.Context, filter packages.Package
 	return result, nil
 }
 
+func TestEncodeExportName(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		want string
+	}{
+		{"AZaz09-._~", "AZaz09-._~"},
+		{"space name", "space%20name"},
+		{"space+name", "space%2Bname"},
+		{"kernel:x86_64,1:1.0-1", "kernel%3Ax86_64%2C1%3A1.0-1"},
+		{"literal%2Fname", "literal%252Fname"},
+		{"caf\u00e9/ops?#&=", "caf%C3%A9%2Fops%3F%23%26%3D"},
+	} {
+		if got := encodeExportName(test.name); got != test.want {
+			t.Errorf("encodeExportName(%q) = %q, want %q", test.name, got, test.want)
+		}
+	}
+}
+
 func TestPackagesExportCLIUsesJSONLinesAndFilter(t *testing.T) {
 	manager := exportPackagesFixture{items: []packages.Packages{
 		{Name: packages.PackageNames{Values: []string{"alpha"}, Scalar: true}, Version: "1.0"},

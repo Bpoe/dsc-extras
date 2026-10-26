@@ -85,7 +85,7 @@ func runAPTRepositories(args []string, stdin io.Reader, stdout, stderr io.Writer
 			result := struct {
 				apt.Repository
 				ExportName string `json:"_name"`
-			}{item, url.QueryEscape(item.Name)}
+			}{item, encodeExportName(item.Name)}
 			if code := writeJSON(stdout, result, stderr); code != 0 {
 				return code
 			}
@@ -184,6 +184,10 @@ func readInput(input io.Reader) (apt.Repository, error) {
 		return apt.Repository{}, err
 	}
 	return instance, nil
+}
+
+func encodeExportName(name string) string {
+	return strings.ReplaceAll(url.QueryEscape(name), "+", "%20")
 }
 
 func writeJSON(stdout io.Writer, value any, stderr io.Writer) int {

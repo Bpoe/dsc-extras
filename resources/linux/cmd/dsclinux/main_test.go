@@ -143,12 +143,14 @@ func TestCLIContract(t *testing.T) {
 func TestServiceExportWritesJSONLinesAndSupportsIdentityFilter(t *testing.T) {
 	manager := newFakeManager()
 	for _, test := range []struct {
-		input string
-		count int
+		input      string
+		count      int
+		exportName string
 	}{
-		{"", 1},
-		{`{"name":"example","scope":"user"}`, 1},
-		{`{"name":"missing"}`, 0},
+		{"", 1, "example"},
+		{`{"name":"example","scope":"system"}`, 1, "example"},
+		{`{"name":"example","scope":"user"}`, 1, "example%2Cuser"},
+		{`{"name":"missing"}`, 0, ""},
 	} {
 		code, stdout, stderr := call(t, manager, []string{"services", "export"}, test.input)
 		lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
@@ -163,7 +165,7 @@ func TestServiceExportWritesJSONLinesAndSupportsIdentityFilter(t *testing.T) {
 			ExportName string `json:"_name"`
 		}
 		if code != 0 || stderr != "" || len(lines) != 1 || json.Unmarshal([]byte(lines[0]), &actual) != nil ||
-			actual.Name != "example" || actual.ExportName != actual.Name {
+			actual.Name != "example" || actual.ExportName != test.exportName {
 			t.Fatalf("invalid JSON Lines Export = %d %q %q", code, stdout, stderr)
 		}
 	}
@@ -175,18 +177,23 @@ func TestExportNamesAreURLEncoded(t *testing.T) {
 		encoded string
 	}{
 		{"safe-name_1.service", "safe-name_1.service"},
+		{"AZaz09-._~", "AZaz09-._~"},
 		{"example@unit:instance+.service", "example%40unit%3Ainstance%2B.service"},
-		{"space name", "space+name"},
+		{"space name", "space%20name"},
+		{"space+name", "space%2Bname"},
 		{"literal%2Fname", "literal%252Fname"},
 		{`literal\x2d.service`, "literal%5Cx2d.service"},
 		{"caf\u00e9/ops?#&=", "caf%C3%A9%2Fops%3F%23%26%3D"},
 	} {
 		for _, resource := range []struct {
-			name  string
-			items any
+			name       string
+			items      any
+			exportName string
 		}{
-			{"services", []services.Unit{{Name: test.name}}},
-			{"groups", []groups.Group{{Name: test.name}}},
+			{"services-system", []services.Unit{{Name: test.name, Scope: "system"}}, test.encoded},
+			{"services-default", []services.Unit{{Name: test.name}}, test.encoded},
+			{"services-user", []services.Unit{{Name: test.name, Scope: "user"}}, test.encoded + "%2Cuser"},
+			{"groups", []groups.Group{{Name: test.name}}, test.encoded},
 		} {
 			t.Run(resource.name+"/"+test.name, func(t *testing.T) {
 				var stdout, stderr strings.Builder
@@ -196,9 +203,9 @@ func TestExportNamesAreURLEncoded(t *testing.T) {
 					ExportName string `json:"_name"`
 				}
 				if code != 0 || stderr.Len() != 0 || json.Unmarshal([]byte(stdout.String()), &actual) != nil ||
-					actual.Name != test.name || actual.ExportName != test.encoded {
+					actual.Name != test.name || actual.ExportName != resource.exportName {
 					t.Fatalf("Export = %d %q %q; want name %q and _name %q",
-						code, stdout.String(), stderr.String(), test.name, test.encoded)
+						code, stdout.String(), stderr.String(), test.name, resource.exportName)
 				}
 			})
 		}

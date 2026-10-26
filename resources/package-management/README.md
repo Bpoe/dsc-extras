@@ -52,13 +52,14 @@ dsc resource export --resource DscExtras.PackageManagement/aptRepositories
 dsc resource export --resource DscExtras.PackageManagement/packages
 ```
 
-Each exported instance includes `_name` as a URL-encoded resource label.
+Each exported instance includes `_name` as an RFC 3986 percent-encoded resource label.
 Repositories and APT packages use their existing `name` property (including any
 architecture qualifier). RPM packages use the compound `name,version`, so
 multiple installed versions of an install-only package have distinct top-level
 resource names.
-URL query encoding escapes reserved characters and UTF-8 bytes with `%HH`
-sequences and represents spaces as `+`; the original `name` property is unchanged.
+Encoding leaves only ASCII letters, digits, and `-._~` unchanged; spaces become `%20`,
+literal `+` becomes `%2B`, and other bytes use `%HH` sequences.
+The original `name` and `version` properties are unchanged.
 For example, `libstdc++6:arm64` becomes `libstdc%2B%2B6%3Aarm64` in `_name`.
 RPM instances of `kernel:x86_64` at versions `1:1.0-1` and `1:2.0-1` become
 `kernel%3Ax86_64%2C1%3A1.0-1` and `kernel%3Ax86_64%2C1%3A2.0-1`, respectively.
