@@ -71,7 +71,7 @@
           "uniqueItems": true
         },
         "_name": {
-          "description": "Export metadata used by DSC as the top-level resource name.",
+          "description": "URL-encoded export metadata used by DSC as the top-level resource name.",
           "type": "string",
           "readOnly": true
         },

@@ -84,7 +84,7 @@
           }
         },
         "_name": {
-          "description": "Export metadata used by DSC as the top-level resource name.",
+          "description": "URL-encoded export label used by DSC as the top-level resource name: name for APT packages, name,version for RPM packages.",
           "type": "string",
           "readOnly": true
         },

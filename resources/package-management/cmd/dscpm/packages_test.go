@@ -42,6 +42,33 @@ func TestDNFPackagesPreservesExitCode(t *testing.T) {
 	}
 }
 
+func TestDNFPackagesExportNamesIncludeVersion(t *testing.T) {
+	var stdout, stderr strings.Builder
+	code := runPackages(t.Context(), []string{"export"}, strings.NewReader(`{"name":"kernel:x86_64"}`),
+		&stdout, &stderr, dnf.NewPackageManager(integrationPackageExecutor{installOnly: true}))
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if code != 0 || stderr.Len() != 0 || len(lines) != 2 {
+		t.Fatalf("install-only RPM Export = %d %q %q", code, stdout.String(), stderr.String())
+	}
+	for i, test := range []struct {
+		version string
+		name    string
+	}{
+		{"1:1.0-1", "kernel%3Ax86_64%2C1%3A1.0-1"},
+		{"1:2.0-1", "kernel%3Ax86_64%2C1%3A2.0-1"},
+	} {
+		var actual struct {
+			Name       string `json:"name"`
+			Version    string `json:"version"`
+			ExportName string `json:"_name"`
+		}
+		if err := json.Unmarshal([]byte(lines[i]), &actual); err != nil ||
+			actual.Name != "kernel:x86_64" || actual.Version != test.version || actual.ExportName != test.name {
+			t.Fatalf("incorrect RPM Export name: %s, %v", lines[i], err)
+		}
+	}
+}
+
 type failedPackageExecutor struct{ err error }
 
 func (e failedPackageExecutor) Execute(context.Context, string, []string, []string) ([]byte, []byte, error) {

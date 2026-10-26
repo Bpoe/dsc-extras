@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -210,7 +211,7 @@ func writeJSONLines(stdout io.Writer, values any, stderr io.Writer) int {
 			result := struct {
 				services.Unit
 				ExportName string `json:"_name"`
-			}{item, item.Name}
+			}{item, url.QueryEscape(item.Name)}
 			if code := writeJSON(stdout, result, stderr); code != 0 {
 				return code
 			}
@@ -225,7 +226,7 @@ func writeJSONLines(stdout io.Writer, values any, stderr io.Writer) int {
 		result := struct {
 			groups.Group
 			ExportName string `json:"_name"`
-		}{item, item.Name}
+		}{item, url.QueryEscape(item.Name)}
 		if code := writeJSON(stdout, result, stderr); code != 0 {
 			return code
 		}

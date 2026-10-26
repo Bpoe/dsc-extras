@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Bpoe/dsc-extras/resources/linux/internal/groups"
 	"github.com/Bpoe/dsc-extras/resources/linux/internal/services"
 )
 
@@ -164,6 +165,42 @@ func TestServiceExportWritesJSONLinesAndSupportsIdentityFilter(t *testing.T) {
 		if code != 0 || stderr != "" || len(lines) != 1 || json.Unmarshal([]byte(lines[0]), &actual) != nil ||
 			actual.Name != "example" || actual.ExportName != actual.Name {
 			t.Fatalf("invalid JSON Lines Export = %d %q %q", code, stdout, stderr)
+		}
+	}
+}
+
+func TestExportNamesAreURLEncoded(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		encoded string
+	}{
+		{"safe-name_1.service", "safe-name_1.service"},
+		{"example@unit:instance+.service", "example%40unit%3Ainstance%2B.service"},
+		{"space name", "space+name"},
+		{"literal%2Fname", "literal%252Fname"},
+		{`literal\x2d.service`, "literal%5Cx2d.service"},
+		{"caf\u00e9/ops?#&=", "caf%C3%A9%2Fops%3F%23%26%3D"},
+	} {
+		for _, resource := range []struct {
+			name  string
+			items any
+		}{
+			{"services", []services.Unit{{Name: test.name}}},
+			{"groups", []groups.Group{{Name: test.name}}},
+		} {
+			t.Run(resource.name+"/"+test.name, func(t *testing.T) {
+				var stdout, stderr strings.Builder
+				code := writeJSONLines(&stdout, resource.items, &stderr)
+				var actual struct {
+					Name       string `json:"name"`
+					ExportName string `json:"_name"`
+				}
+				if code != 0 || stderr.Len() != 0 || json.Unmarshal([]byte(stdout.String()), &actual) != nil ||
+					actual.Name != test.name || actual.ExportName != test.encoded {
+					t.Fatalf("Export = %d %q %q; want name %q and _name %q",
+						code, stdout.String(), stderr.String(), test.name, test.encoded)
+				}
+			})
 		}
 	}
 }

@@ -191,13 +191,20 @@ func TestPackagesExportCLIUsesJSONLinesAndFilter(t *testing.T) {
 	manager := exportPackagesFixture{items: []packages.Packages{
 		{Name: packages.PackageNames{Values: []string{"alpha"}, Scalar: true}, Version: "1.0"},
 		{Name: packages.PackageNames{Values: []string{"beta:arm64"}, Scalar: true}, Version: "2.0"},
+		{Name: packages.PackageNames{Values: []string{"libstdc++6:amd64"}, Scalar: true}, Version: "3.0"},
 	}}
+	exportNames := map[string]string{
+		"alpha":            "alpha",
+		"beta:arm64":       "beta%3Aarm64",
+		"libstdc++6:amd64": "libstdc%2B%2B6%3Aamd64",
+	}
 	for _, test := range []struct {
 		input string
 		lines int
 	}{
-		{"", 2},
+		{"", 3},
 		{`{"name":"beta:arm64"}`, 1},
+		{`{"name":["beta:arm64","libstdc++6:amd64"]}`, 2},
 		{`{"name":"missing"}`, 0},
 	} {
 		var stdout, stderr strings.Builder
@@ -220,7 +227,7 @@ func TestPackagesExportCLIUsesJSONLinesAndFilter(t *testing.T) {
 				ExportName string `json:"_name"`
 			}
 			if err := json.Unmarshal([]byte(line), &item); err != nil ||
-				item.Name == "" || item.ExportName != item.Name {
+				item.Name == "" || item.ExportName == "" || item.ExportName != exportNames[item.Name] {
 				t.Fatalf("invalid export name in JSONL line %q: %v", line, err)
 			}
 		}

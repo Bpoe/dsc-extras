@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,7 +31,10 @@ func TestDSCResourceProcess(t *testing.T) {
 		if arg == "--" {
 			args := os.Args[i+1:]
 			if backend := os.Getenv("DSCPM_TEST_PACKAGE_BACKEND"); backend != "" && len(args) > 0 && args[0] == "packages" {
-				executor := integrationPackageExecutor{empty: os.Getenv("DSCPM_TEST_PACKAGE_EMPTY") == "1"}
+				executor := integrationPackageExecutor{
+					empty:       os.Getenv("DSCPM_TEST_PACKAGE_EMPTY") == "1",
+					installOnly: os.Getenv("DSCPM_TEST_PACKAGE_INSTALL_ONLY") == "1",
+				}
 				var manager packages.Manager
 				switch backend {
 				case "apt":
@@ -48,7 +52,7 @@ func TestDSCResourceProcess(t *testing.T) {
 	t.Fatal("missing resource arguments")
 }
 
-type integrationPackageExecutor struct{ empty bool }
+type integrationPackageExecutor struct{ empty, installOnly bool }
 
 func (f integrationPackageExecutor) Execute(_ context.Context, program string, args, _ []string) ([]byte, []byte, error) {
 	switch program {
@@ -89,6 +93,9 @@ func (f integrationPackageExecutor) Execute(_ context.Context, program string, a
 		if slices.Equal(args, []string{"-qa", "--queryformat", "%{NAME}\t%{EPOCH}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\n"}) {
 			if f.empty {
 				return nil, nil, nil
+			}
+			if f.installOnly {
+				return []byte("kernel\t1\t1.0\t1\tx86_64\nkernel\t1\t2.0\t1\tx86_64\n"), nil, nil
 			}
 			return []byte("alpha\t2\t1.0\t3\tx86_64\nalpha\t2\t1.0\t3\ti686\nuniversal\t(none)\t1.0\t1\tnoarch\n"), nil, nil
 		}
@@ -194,9 +201,13 @@ func TestDSCPackagesObservedExportIntegration(t *testing.T) {
 				}
 				for _, resource := range config.Resources {
 					exported := resource.Properties
+					name := exported.Name.Values[0]
+					if backend == "dnf" {
+						name += "," + exported.Version
+					}
 					if exported.Ensure != "Present" || exported.State != "Present" || exported.Version == "" ||
 						len(exported.Packages) != 1 || !exported.Packages[0].Installed ||
-						resource.Name != exported.Name.Values[0] ||
+						resource.Name != url.QueryEscape(name) ||
 						exported.Packages[0].RequestedName != exported.Name.Values[0] ||
 						exported.Packages[0].Version != exported.Version || exported.Packages[0].Architecture == "" {
 						t.Fatalf("Export omitted or invented observations: %+v", exported)
@@ -216,6 +227,44 @@ func TestDSCPackagesObservedExportIntegration(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDSCInstallOnlyRPMExportUsesUniqueNames(t *testing.T) {
+	t.Setenv("DSCAPT_TEST_ROOT", makeStore(t).Root)
+	t.Setenv("DSCPM_TEST_PACKAGE_BACKEND", "dnf")
+	t.Setenv("DSCPM_TEST_PACKAGE_INSTALL_ONLY", "1")
+	dsc, resourceType := prepareDSCResource(t, "packages.dsc.resource.json")
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, dsc, "resource", "export", "--resource", resourceType,
+		"--input", `{"name":"kernel:x86_64"}`, "--output-format", "json")
+	var stderr strings.Builder
+	command.Stderr = &stderr
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("DSC install-only RPM Export: %v\n%s\n%s", err, output, stderr.String())
+	}
+	var config struct {
+		Resources []struct {
+			Name       string
+			Properties packages.Packages
+		}
+	}
+	if err := json.Unmarshal(output, &config); err != nil || len(config.Resources) != 2 {
+		t.Fatalf("DSC install-only RPM Export = %s, %v", output, err)
+	}
+	want := map[string]string{
+		"kernel%3Ax86_64%2C1%3A1.0-1": "1:1.0-1",
+		"kernel%3Ax86_64%2C1%3A2.0-1": "1:2.0-1",
+	}
+	for _, resource := range config.Resources {
+		version, ok := want[resource.Name]
+		if !ok || !slices.Equal(resource.Properties.Name.Values, []string{"kernel:x86_64"}) ||
+			resource.Properties.Version != version {
+			t.Fatalf("incorrect or duplicate RPM export name: %s", output)
+		}
+		delete(want, resource.Name)
 	}
 }
 

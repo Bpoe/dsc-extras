@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -84,7 +85,7 @@ func runAPTRepositories(args []string, stdin io.Reader, stdout, stderr io.Writer
 			result := struct {
 				apt.Repository
 				ExportName string `json:"_name"`
-			}{item, item.Name}
+			}{item, url.QueryEscape(item.Name)}
 			if code := writeJSON(stdout, result, stderr); code != 0 {
 				return code
 			}

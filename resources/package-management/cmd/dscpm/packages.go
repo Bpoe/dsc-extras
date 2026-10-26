@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/apt"
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/dnf"
@@ -54,11 +55,16 @@ func runPackages(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		if err != nil {
 			return reportError(stderr, err.Error())
 		}
+		_, rpm := manager.(*dnf.PackageManager)
 		for _, item := range items {
+			name := item.Name.Values[0]
+			if rpm {
+				name += "," + item.Version
+			}
 			result := struct {
 				packages.Packages
 				ExportName string `json:"_name"`
-			}{item, item.Name.Values[0]}
+			}{item, url.QueryEscape(name)}
 			if code := writeJSON(stdout, result, stderr); code != 0 {
 				return code
 			}
