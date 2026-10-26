@@ -185,6 +185,7 @@ func TestDSCPackagesObservedExportIntegration(t *testing.T) {
 				output := invoke("export", test.input)
 				var config struct {
 					Resources []struct {
+						Name       string
 						Properties packages.Packages
 					}
 				}
@@ -195,6 +196,7 @@ func TestDSCPackagesObservedExportIntegration(t *testing.T) {
 					exported := resource.Properties
 					if exported.Ensure != "Present" || exported.State != "Present" || exported.Version == "" ||
 						len(exported.Packages) != 1 || !exported.Packages[0].Installed ||
+						resource.Name != exported.Name.Values[0] ||
 						exported.Packages[0].RequestedName != exported.Name.Values[0] ||
 						exported.Packages[0].Version != exported.Version || exported.Packages[0].Architecture == "" {
 						t.Fatalf("Export omitted or invented observations: %+v", exported)
@@ -263,6 +265,7 @@ func TestDSCRepositoryExportFilterIntegration(t *testing.T) {
 						}
 						var config struct {
 							Resources []struct {
+								Name       string
 								Properties apt.Repository
 							}
 						}
@@ -270,6 +273,9 @@ func TestDSCRepositoryExportFilterIntegration(t *testing.T) {
 							t.Fatalf("filtered Export = %s, %v", output, err)
 						}
 						exported := config.Resources[0].Properties
+						if config.Resources[0].Name != exported.Name {
+							t.Fatalf("DSC repository Export did not use the repository name: %s", output)
+						}
 						if err := apt.ValidateDesired(&exported); err != nil {
 							t.Fatalf("Export is not reusable desired state: %+v, %v", exported, err)
 						}

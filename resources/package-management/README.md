@@ -52,6 +52,10 @@ dsc resource export --resource DscExtras.PackageManagement/aptRepositories
 dsc resource export --resource DscExtras.PackageManagement/packages
 ```
 
+Each exported instance includes `_name` matching its existing `name` property,
+so DSC uses the repository label or package identity (including any architecture
+qualifier) as the top-level resource name.
+
 The legacy `DscExtras.Apt/Repository` manifest uses the same repository
 enumerator. DSC's `--input`/`--file` filters use resource properties:
 repository filters supply `name`, `uri`, and `suite`, matching the normalized URI

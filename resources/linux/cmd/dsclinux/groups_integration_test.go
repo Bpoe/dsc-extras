@@ -188,6 +188,7 @@ func TestDSCGroupsIntegration(t *testing.T) {
 		if args[1] == "export" {
 			var config struct {
 				Resources []struct {
+					Name       string
 					Properties groups.Group
 				}
 			}
@@ -195,6 +196,9 @@ func TestDSCGroupsIntegration(t *testing.T) {
 				t.Fatalf("DSC group Export: %s, %v", output, err)
 			}
 			exported := config.Resources[0].Properties
+			if config.Resources[0].Name != exported.Name {
+				t.Fatalf("DSC group Export did not use the group name: %s", output)
+			}
 			input, err := json.Marshal(exported)
 			if err != nil {
 				t.Fatal(err)

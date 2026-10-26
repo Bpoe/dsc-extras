@@ -202,7 +202,9 @@ dsc resource export --resource DscExtras.Linux/services --input '{"scope":"user"
 ```
 
 Export emits JSON Lines from `dsclinux`; DSC owns the resulting configuration
-document. An optional resource-shaped filter can be supplied with DSC's
+document. Each exported instance includes `_name` matching its existing `name`
+property, so DSC uses the group or unit name as the top-level resource name.
+An optional resource-shaped filter can be supplied with DSC's
 `--input` or `--file` options. Groups match the exact `name`; services match
 the optional exact `name` and `scope` (`system` by default). A scope-only filter
 enumerates all units in that manager without requiring a name. Get, Test, and

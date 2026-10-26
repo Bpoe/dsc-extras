@@ -238,7 +238,9 @@ func TestGroupsManifest(t *testing.T) {
 	if manifest.Test.Return != "stateAndDiff" || manifest.Set.Return != "state" || !manifest.Set.ImplementsPretest ||
 		!schema.AdditionalProperties || !slices.Equal(schema.Required, []string{"name"}) ||
 		schema.Properties["name"]["x-dsc-key"] != true || schema.Properties["ensure"]["default"] != "Present" ||
-		schema.Properties["_inDesiredState"]["readOnly"] != true || len(schema.AllOf) != 2 {
+		schema.Properties["_inDesiredState"]["readOnly"] != true ||
+		schema.Properties["_name"]["type"] != "string" || schema.Properties["_name"]["readOnly"] != true ||
+		len(schema.AllOf) != 2 {
 		t.Fatalf("incorrect schema/contract: %s", data)
 	}
 	for _, property := range []string{"gid", "members", "includedMembers", "excludedMembers"} {
@@ -269,9 +271,12 @@ func TestGroupsExportWritesJSONLinesAndFiltersByName(t *testing.T) {
 			}
 			continue
 		}
-		var actual groups.Group
+		var actual struct {
+			Name       string `json:"name"`
+			ExportName string `json:"_name"`
+		}
 		if code != 0 || stderr != "" || json.Unmarshal([]byte(strings.TrimSpace(stdout)), &actual) != nil ||
-			actual.Name != "dev" {
+			actual.Name != "dev" || actual.ExportName != actual.Name {
 			t.Fatalf("invalid JSON Lines Export = %d %q %q", code, stdout, stderr)
 		}
 	}

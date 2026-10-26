@@ -157,9 +157,12 @@ func TestServiceExportWritesJSONLinesAndSupportsIdentityFilter(t *testing.T) {
 			}
 			continue
 		}
-		var actual services.Unit
+		var actual struct {
+			services.Unit
+			ExportName string `json:"_name"`
+		}
 		if code != 0 || stderr != "" || len(lines) != 1 || json.Unmarshal([]byte(lines[0]), &actual) != nil ||
-			actual.Name != "example" {
+			actual.Name != "example" || actual.ExportName != actual.Name {
 			t.Fatalf("invalid JSON Lines Export = %d %q %q", code, stdout, stderr)
 		}
 	}
@@ -253,7 +256,10 @@ func TestManifest(t *testing.T) {
 			t.Fatalf("%s must be unmanaged when omitted", property)
 		}
 	}
-	for _, property := range []string{"activeState", "subState", "loadState", "unitFileState", "_inDesiredState"} {
+	if schema.Properties["_name"]["type"] != "string" {
+		t.Fatal("_name must be a string")
+	}
+	for _, property := range []string{"activeState", "subState", "loadState", "unitFileState", "_name", "_inDesiredState"} {
 		if schema.Properties[property]["readOnly"] != true {
 			t.Fatalf("%s must be read-only", property)
 		}

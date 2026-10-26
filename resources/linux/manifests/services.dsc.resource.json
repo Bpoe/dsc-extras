@@ -75,6 +75,11 @@
         "subState": {"type": "string", "readOnly": true},
         "loadState": {"type": "string", "readOnly": true},
         "unitFileState": {"type": "string", "readOnly": true},
+        "_name": {
+          "description": "Export metadata used by DSC as the top-level resource name.",
+          "type": "string",
+          "readOnly": true
+        },
         "_inDesiredState": {"type": ["boolean", "null"], "readOnly": true}
       },
       "additionalProperties": true

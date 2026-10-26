@@ -187,6 +187,7 @@ func TestDSCIntegration(t *testing.T) {
 				}
 				var config struct {
 					Resources []struct {
+						Name       string
 						Properties map[string]json.RawMessage
 					}
 				}
@@ -198,7 +199,7 @@ func TestDSCIntegration(t *testing.T) {
 					var exported services.Unit
 					data, err := json.Marshal(properties)
 					if err != nil || json.Unmarshal(data, &exported) != nil ||
-						exported.Name != filter.names[i] || exported.Scope != filter.scope ||
+						resource.Name != filter.names[i] || exported.Name != filter.names[i] || exported.Scope != filter.scope ||
 						exported.Enabled == nil || *exported.Enabled || exported.Masked == nil || *exported.Masked {
 						t.Fatalf("incorrect exported properties: %s (%v)", data, err)
 					}

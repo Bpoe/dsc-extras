@@ -207,7 +207,11 @@ func writeJSONLines(stdout io.Writer, values any, stderr io.Writer) int {
 	items, ok := values.([]services.Unit)
 	if ok {
 		for _, item := range items {
-			if code := writeJSON(stdout, item, stderr); code != 0 {
+			result := struct {
+				services.Unit
+				ExportName string `json:"_name"`
+			}{item, item.Name}
+			if code := writeJSON(stdout, result, stderr); code != 0 {
 				return code
 			}
 		}
@@ -218,7 +222,11 @@ func writeJSONLines(stdout io.Writer, values any, stderr io.Writer) int {
 		return reportError(stderr, "unsupported export result")
 	}
 	for _, item := range groupItems {
-		if code := writeJSON(stdout, item, stderr); code != 0 {
+		result := struct {
+			groups.Group
+			ExportName string `json:"_name"`
+		}{item, item.Name}
+		if code := writeJSON(stdout, result, stderr); code != 0 {
 			return code
 		}
 	}

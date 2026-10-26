@@ -83,6 +83,11 @@
             "additionalProperties": false
           }
         },
+        "_name": {
+          "description": "Export metadata used by DSC as the top-level resource name.",
+          "type": "string",
+          "readOnly": true
+        },
         "_inDesiredState": {"type": ["boolean", "null"], "readOnly": true}
       },
       "allOf": [

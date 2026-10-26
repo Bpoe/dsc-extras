@@ -96,6 +96,11 @@ func TestManifestsShareImplementation(t *testing.T) {
 			!reflect.DeepEqual(export["args"], []any{"aptRepositories", "export"}) {
 			t.Fatalf("%s export does not invoke the shared handler: %v", name, export)
 		}
+		schema := manifest["schema"].(map[string]any)["embedded"].(map[string]any)
+		exportName := schema["properties"].(map[string]any)["_name"].(map[string]any)
+		if exportName["type"] != "string" || exportName["readOnly"] != true {
+			t.Fatalf("%s must declare _name as a read-only string: %v", name, exportName)
+		}
 		if manifest["test"].(map[string]any)["return"] != "stateAndDiff" ||
 			manifest["set"].(map[string]any)["return"] != "state" ||
 			manifest["set"].(map[string]any)["implementsPretest"] != true {
@@ -135,10 +140,14 @@ func TestAPTRepositoryExportCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, stdout, stderr := call(t, store, "export", "")
-	var item apt.Repository
+	var item struct {
+		apt.Repository
+		ExportName string `json:"_name"`
+	}
 	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
 	if code != 0 || stderr != "" || len(lines) != 1 || json.Unmarshal([]byte(lines[0]), &item) != nil ||
-		item.Ensure != "Present" || item.URI != "https://repo.example/debian" || item.Suite != "stable" {
+		item.Ensure != "Present" || item.URI != "https://repo.example/debian" || item.Suite != "stable" ||
+		item.ExportName == "" || item.ExportName != item.Name {
 		t.Fatalf("invalid repository JSON Lines: %d %q %q", code, stdout, stderr)
 	}
 	filter := `{"name":"` + item.Name + `","uri":"` + item.URI + `","suite":"stable"}`
@@ -206,8 +215,13 @@ func TestPackagesExportCLIUsesJSONLinesAndFilter(t *testing.T) {
 			t.Fatalf("export = %d %q %q", code, output, stderr.String())
 		}
 		for _, line := range lines {
-			if !json.Valid([]byte(line)) {
-				t.Fatalf("invalid JSONL line %q", line)
+			var item struct {
+				Name       string `json:"name"`
+				ExportName string `json:"_name"`
+			}
+			if err := json.Unmarshal([]byte(line), &item); err != nil ||
+				item.Name == "" || item.ExportName != item.Name {
+				t.Fatalf("invalid export name in JSONL line %q: %v", line, err)
 			}
 		}
 	}
@@ -226,6 +240,11 @@ func TestPackagesManifestDeclaresExport(t *testing.T) {
 	if export["executable"] != "dscpm" || export["input"] != "stdin" ||
 		!reflect.DeepEqual(export["args"], []any{"packages", "export"}) {
 		t.Fatalf("invalid package Export declaration: %s", data)
+	}
+	schema := manifest["schema"].(map[string]any)["embedded"].(map[string]any)
+	exportName := schema["properties"].(map[string]any)["_name"].(map[string]any)
+	if exportName["type"] != "string" || exportName["readOnly"] != true {
+		t.Fatalf("packages must declare _name as a read-only string: %v", exportName)
 	}
 }
 
