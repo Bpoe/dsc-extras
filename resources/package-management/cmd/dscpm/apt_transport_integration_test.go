@@ -18,10 +18,12 @@ func TestDSCAPTTransportExportAndTest(t *testing.T) {
 			store := makeStore(t)
 			seedAPTTransports(t, store, "sources")
 			t.Setenv("DSCAPT_TEST_ROOT", store.Root)
-			ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
-			defer cancel()
 			invoke := func(operation string, input []byte) []byte {
 				t.Helper()
+				// Bound each invocation independently: race-instrumented resource
+				// subprocesses add exit delays across this transport matrix.
+				ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+				defer cancel()
 				args := []string{"resource", operation, "--resource", resourceType, "--output-format", "json"}
 				if input != nil {
 					args = append(args, "--file", "-")
