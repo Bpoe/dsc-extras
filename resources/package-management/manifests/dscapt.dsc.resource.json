@@ -50,7 +50,7 @@
         },
         "uri": {
           "title": "Repository URI",
-          "description": "Absolute HTTP, HTTPS, or local file URI for the APT repository.",
+          "description": "Absolute APT URI: HTTP, HTTPS, local file or copy, mirror, or mirror+http/https/file/copy. Mirror-list URIs are preserved exactly; credentials and fragments are not allowed.",
           "type": "string",
           "format": "uri",
           "x-dsc-key": true

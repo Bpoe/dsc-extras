@@ -93,7 +93,7 @@ func ValidateDesired(repository *Repository) error {
 
 func validateProperties(repository Repository) error {
 	if err := validateURI(repository.URI); err != nil {
-		return errors.New("uri must be an absolute HTTP, HTTPS, or file URL without user information or fragment")
+		return errors.New("uri must be an absolute supported APT transport URI without user information or fragment")
 	}
 	if !suitePattern.MatchString(repository.Suite) {
 		return errors.New("suite must be a non-empty APT suite token")
@@ -135,12 +135,19 @@ func validateURI(value string) error {
 	if !parsed.IsAbs() || parsed.Opaque != "" || parsed.User != nil {
 		return errors.New("invalid URI")
 	}
-	switch parsed.Scheme {
+	// Mirror transports acquire a list using the underlying transport. The legacy
+	// mirror scheme is an alias for mirror+http. Validate that transport's shape
+	// without rewriting the original URI or accessing the mirror list.
+	transport := strings.TrimPrefix(parsed.Scheme, "mirror+")
+	if parsed.Scheme == "mirror" {
+		transport = "http"
+	}
+	switch transport {
 	case "http", "https":
 		if parsed.Host == "" || parsed.Hostname() == "" {
 			return errors.New("invalid URI")
 		}
-	case "file":
+	case "file", "copy":
 		if parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") {
 			return errors.New("invalid URI")
 		}
@@ -206,7 +213,10 @@ func DifferingProperties(desired, actual Repository) []string {
 
 func repositoryURI(uri string) string {
 	parsed, err := url.Parse(uri)
-	if err != nil || parsed.RawQuery != "" {
+	// Mirror URIs identify list files, so a trailing slash is significant.
+	// This key is only for comparisons; serialized state retains the source URI.
+	if err != nil || parsed.RawQuery != "" || parsed.ForceQuery ||
+		parsed.Scheme == "mirror" || strings.HasPrefix(parsed.Scheme, "mirror+") {
 		return uri
 	}
 	if !strings.HasSuffix(uri, "/") {

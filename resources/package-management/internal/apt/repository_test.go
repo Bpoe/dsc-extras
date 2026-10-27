@@ -108,6 +108,10 @@ func TestDifferingPropertiesAndEqualAgree(t *testing.T) {
 		{name: "identical"},
 		{name: "management label", change: func(_, actual *Repository) { actual.Name = "external" }},
 		{name: "trailing URI slash", change: func(_, actual *Repository) { actual.URI += "/" }},
+		{name: "mirror-list trailing slash is significant", change: func(desired, actual *Repository) {
+			desired.URI = "mirror+file:///etc/apt/mirrors/debian.list"
+			actual.URI = desired.URI + "/"
+		}, want: []string{"uri"}},
 		{name: "different URI", change: func(_, actual *Repository) { actual.URI += "/other" }, want: []string{"uri"}},
 		{name: "URI query slash is significant", change: func(desired, actual *Repository) {
 			desired.URI += "?channel=stable"
@@ -167,6 +171,93 @@ func TestDifferingPropertiesAndEqualAgree(t *testing.T) {
 			}
 			if Equal(desired, actual) != (len(differences) == 0) {
 				t.Fatal("Equal disagrees with DifferingProperties")
+			}
+		})
+	}
+}
+
+func TestAPTTransportURIs(t *testing.T) {
+	for _, uri := range []string{
+		"mirror+file:///etc/apt/mirrors/debian.list",
+		"mirror+file:///etc/apt/mirrors/debian-security.list",
+		"mirror+file:/etc/apt/mirrors/debian.list",
+		"mirror+http://mirrors.example/debian.list",
+		"mirror+https://mirrors.example/debian.list",
+		"mirror+copy:/etc/apt/mirrors/debian.list",
+		"mirror://mirrors.example/debian.list",
+		"http://archive.ubuntu.com/ubuntu",
+		"https://security.ubuntu.com/ubuntu/",
+		"file:///srv/apt/repo", "file:/srv/apt/repo",
+		"copy:/srv/apt/repo",
+		"mirror+https://MIRRORS.example:443/a/../debian%2elist?channel=stable",
+	} {
+		t.Run(uri, func(t *testing.T) {
+			desired := validDesired()
+			desired.URI = uri
+			if err := ValidateDesired(&desired); err != nil {
+				t.Fatal(err)
+			}
+			if desired.URI != uri {
+				t.Fatalf("URI changed to %q", desired.URI)
+			}
+			for _, format := range []AptFormat{ListFormat, Deb822Format} {
+				text := "deb " + uri + " trixie main\n"
+				if format == Deb822Format {
+					text = "Types: deb\nURIs: " + uri + "\nSuites: trixie\nComponents: main\n"
+				}
+				document, err := parseDocument("transport"+string(format), []byte(text))
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Force serialization of the physical entry as well as parsing it.
+				document.Entries[0].Components = []string{"main", "contrib"}
+				data, err := document.contents()
+				if err != nil {
+					t.Fatal(err)
+				}
+				roundTrip, err := parseDocument(document.Path, data)
+				if err != nil || roundTrip.Entries[0].URI != uri {
+					t.Fatalf("URI round trip: %s (%v)", data, err)
+				}
+			}
+			if strings.HasPrefix(uri, "mirror") {
+				if repositoryURI(uri) != uri || repositoryURI(uri) == repositoryURI(uri+"/") {
+					t.Fatal("mirror-list filenames must be compared exactly")
+				}
+			}
+		})
+	}
+}
+
+func TestAPTTransportRejectsUnsafeURIs(t *testing.T) {
+	for _, uri := range []string{
+		"", "/etc/apt/mirrors/debian.list", "https:///repo", "http:repo",
+		"mirror+http:///debian.list", "mirror+https:debian.list",
+		"mirror+file:relative.list", "mirror+copy:relative.list",
+		"file://remote/srv/apt", "mirror+file://remote/etc/apt/debian.list",
+		"mirror+copy://remote/etc/apt/debian.list",
+		"mirror+ftp://example/debian.list", "unknown://example/repo",
+		"mirror+mirror+https://example/list", "mirror+mirror://example/list", "https://example/%zz",
+		"https://user:password@example/repo", "http://user@example/repo",
+		"file://user@/srv/apt", "mirror+file://user@/etc/apt/debian.list",
+		"mirror+http://user:password@example/debian.list",
+		"mirror+https://user%40name:password@example/debian.list",
+		"mirror://user@example/debian.list", "mirror+copy://user@/list",
+		"https://example/repo#fragment", "mirror+file:///list#",
+		"mirror+https://example/list#fragment", "mirror+file:///list\n",
+		"mirror+file:///list extra", "mirror+https://example/\tlist",
+	} {
+		t.Run(uri, func(t *testing.T) {
+			if err := validateURI(uri); err == nil {
+				t.Fatalf("accepted unsafe URI %q", uri)
+			}
+			desired := validDesired()
+			desired.URI = uri
+			if err := ValidateSelector(desired); err == nil {
+				t.Fatal("selector accepted unsafe URI")
+			}
+			if err := ValidateDesired(&desired); err == nil {
+				t.Fatal("desired state accepted unsafe URI")
 			}
 		})
 	}

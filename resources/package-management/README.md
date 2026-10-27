@@ -115,7 +115,12 @@ even when its URL or suite differs. For files containing multiple repositories,
 URI and suite select the entry to manage; ambiguous edits are rejected.
 If the named file does not identify the repository, discovery by URI and suite
 preserves existing configurations in other files instead of creating duplicates.
-A trailing URI slash is equivalent, except in URIs containing query strings.
+HTTP, HTTPS, local `file` and `copy`, legacy `mirror`, and `mirror+http`,
+`mirror+https`, `mirror+file`, and `mirror+copy` URIs are supported. Credentials
+and fragments are rejected. Original URIs are preserved without resolving mirror
+lists or cleaning paths. A trailing URI slash is equivalent for directory
+repositories, except in URIs containing query strings. Mirror-list URIs identify
+files and are compared exactly, including any trailing slash.
 
 Discovery reads `/etc/apt/sources.list`, `/etc/apt/sources.list.d/*.list`, and
 `/etc/apt/sources.list.d/*.sources`. Multiple lines/stanzas and Deb822
