@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/Bpoe/dsc-extras/resources/exportinput"
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/apt"
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/dnf"
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/packages"
@@ -138,7 +139,7 @@ func runPackages(ctx context.Context, args []string, stdin io.Reader, stdout, st
 }
 
 func readPackageExportFilter(input io.Reader) (packages.Packages, error) {
-	data, err := io.ReadAll(io.LimitReader(input, maxInputBytes+1))
+	data, err := io.ReadAll(io.LimitReader(exportinput.Reader(input), maxInputBytes+1))
 	if err != nil {
 		return packages.Packages{}, err
 	}

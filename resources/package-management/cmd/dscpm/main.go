@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Bpoe/dsc-extras/resources/exportinput"
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/apt"
 	"github.com/Bpoe/dsc-extras/resources/package-management/internal/packages"
 )
@@ -130,7 +131,7 @@ func runAPTRepositories(args []string, stdin io.Reader, stdout, stderr io.Writer
 }
 
 func readOptionalAPTInput(input io.Reader) (apt.Repository, error) {
-	data, err := io.ReadAll(io.LimitReader(input, maxInputBytes+1))
+	data, err := io.ReadAll(io.LimitReader(exportinput.Reader(input), maxInputBytes+1))
 	if err != nil {
 		return apt.Repository{}, err
 	}

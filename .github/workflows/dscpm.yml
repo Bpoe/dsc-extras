@@ -5,6 +5,8 @@ on:
     paths:
       - ".github/workflows/dscpm.yml"
       - "resources/package-management/**"
+      - "resources/go.*"
+      - "resources/exportinput/**"
   push:
     branches:
       - "**"
@@ -13,6 +15,8 @@ on:
     paths:
       - ".github/workflows/dscpm.yml"
       - "resources/package-management/**"
+      - "resources/go.*"
+      - "resources/exportinput/**"
   workflow_dispatch:
 
 permissions:
