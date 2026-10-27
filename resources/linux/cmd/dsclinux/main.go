@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Bpoe/dsc-extras/resources/exportinput"
 	"github.com/Bpoe/dsc-extras/resources/linux/internal/groups"
 	"github.com/Bpoe/dsc-extras/resources/linux/internal/services"
 )
@@ -132,7 +133,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 }
 
 func readOptionalProperties(input io.Reader, target any) error {
-	data, err := io.ReadAll(io.LimitReader(input, maxInputBytes+1))
+	data, err := io.ReadAll(io.LimitReader(exportinput.Reader(input), maxInputBytes+1))
 	if err != nil {
 		return err
 	}
