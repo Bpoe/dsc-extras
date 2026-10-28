@@ -11,12 +11,12 @@ for attempt in {1..30}; do
   sleep 1
 done
 "$DSCPKG" install --repository "$repo" --packages-dir "$packages" --platform linux_amd64 \
-  --resource DscExtras.Linux/groups --version 0.0.1
+  --resource DscExtras.Linux/groups --version 0.0.3
 "$DSCPKG" install --repository "$repo" --packages-dir "$packages" --platform linux_amd64 \
-  --resource DscExtras.Linux/services --version 0.0.1
+  --resource DscExtras.Linux/services --version 0.0.3
 test "$(find "$packages" -type f -name dsclinux | wc -l)" -eq 1
 "$DSCPKG" install --repository "$repo" --packages-dir "$packages" --platform linux_amd64 \
-  --resource DscExtras.PackageManagement/packages --version 0.1.1
+  --resource DscExtras.PackageManagement/packages --version 0.1.3
 "$DSCPKG" install --repository "$repo" --packages-dir "$packages" --platform linux_amd64 \
-  --resource DscExtras.PackageManagement/aptRepositories --version 0.1.1
+  --resource DscExtras.PackageManagement/aptRepositories --version 0.1.3
 test "$(find "$packages" -type f -name dscpm | wc -l)" -eq 1
